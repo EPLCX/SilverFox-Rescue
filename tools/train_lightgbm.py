@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Train one native LightGBM model for Safe, Generic, and virus families."""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+if __package__:
+    from .tool_paths import MODEL_DIR, MODEL_HEADER, MODEL_REPORT, prepare_temp_dir
+else:
+    from tool_paths import MODEL_DIR, MODEL_HEADER, MODEL_REPORT, prepare_temp_dir
+
+prepare_temp_dir()
+
+import lightgbm as lgb
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, brier_score_loss, confusion_matrix, roc_auc_score
+from sklearn.model_selection import StratifiedGroupKFold
+
+if __package__:
+    from .train_static_ml import FEATURE_NAMES, c_float, load_extra_safe, load_samples, remove_conflicting_duplicates
+else:
+    from train_static_ml import FEATURE_NAMES, c_float, load_extra_safe, load_samples, remove_conflicting_duplicates
+
+
+CONFIGS = {
+    "compact": dict(n_estimators=180, learning_rate=0.045, num_leaves=15, max_depth=6,
+                    min_child_samples=5, colsample_bytree=0.80, reg_lambda=4.0),
+    "balanced": dict(n_estimators=260, learning_rate=0.035, num_leaves=23, max_depth=7,
+                     min_child_samples=3, colsample_bytree=0.85, reg_lambda=6.0),
+}
+
+
+def model(seed: int, config: dict):
+    return lgb.LGBMClassifier(**config, objective="multiclass", subsample=0.9,
+                              subsample_freq=1, verbosity=-1, n_jobs=-1, random_state=seed)
+
+
+def probabilities(fitted, x, class_count):
+    values = np.zeros((len(x), class_count), np.float64)
+    predicted = fitted.predict_proba(x)
+    for column, label in enumerate(fitted.classes_):
+        values[:, int(label)] = predicted[:, column]
+    return values
+
+
+def grouped_oof(x, y, binary, groups, weights, config, seed, class_count):
+    values = np.zeros((len(y), class_count), np.float64)
+    splitter = StratifiedGroupKFold(n_splits=2, shuffle=True, random_state=seed)
+    for fold, (train, valid) in enumerate(splitter.split(x, binary, groups), 1):
+        fitted = model(seed + fold, config)
+        fitted.fit(x[train], y[train], sample_weight=weights[train])
+        values[valid] = probabilities(fitted, x[valid], class_count)
+        print(f"fold {fold}/2: {len(valid)} validated", flush=True)
+    return values
+
+
+def point(y, p, threshold):
+    tn, fp, fn, tp = confusion_matrix(y, p >= threshold, labels=[0, 1]).ravel()
+    return {"threshold": float(threshold), "safe": int(tn+fp), "malicious": int(tp+fn),
+            "false_positive": int(fp), "true_positive": int(tp),
+            "false_positive_rate": float(fp/max(tn+fp, 1)), "recall": float(tp/max(tp+fn, 1)),
+            "precision": float(tp/max(tp+fp, 1))}
+
+
+def threshold_for(y, p, max_fpr, floor):
+    allowance = int((y == 0).sum() * max_fpr)
+    candidates = np.unique(p[p >= floor])
+    for threshold in candidates:
+        if np.count_nonzero((y == 0) & (p >= threshold)) <= allowance:
+            return float(threshold)
+    return 1.0
+
+
+def calibrate(probabilities, slope, intercept):
+    raw = np.clip(probabilities, 1e-7, 1-1e-7)
+    margin = np.log(raw / (1-raw))
+    values = np.clip(slope * margin + intercept, -40, 40)
+    return 1 / (1 + np.exp(-values))
+
+
+def flatten(booster):
+    offsets, left, right, features, thresholds, values = [], [], [], [], [], []
+    def visit(node):
+        at = len(features)
+        features.append(-1); left.append(-1); right.append(-1); thresholds.append(0.0); values.append(0.0)
+        if "leaf_value" in node:
+            values[at] = float(node["leaf_value"])
+        else:
+            features[at] = int(node["split_feature"])
+            thresholds[at] = float(node["threshold"])
+            left[at] = visit(node["left_child"])
+            right[at] = visit(node["right_child"])
+        return at
+    for info in booster.dump_model()["tree_info"]:
+        offsets.append(len(features))
+        visit(info["tree_structure"])
+        base = offsets[-1]
+        for at in range(base, len(features)):
+            if features[at] >= 0:
+                left[at] -= base; right[at] -= base
+    return offsets, left, right, features, thresholds, values
+
+
+def lines(values, format_value=str, width=10):
+    return ["    " + ", ".join(format_value(value) for value in values[i:i+width]) + ","
+            for i in range(0, len(values), width)]
+
+
+def write_header(path, tree, classes, suspicious, malicious, slope, intercept, timestamp):
+    offsets, left, right, features, thresholds, values = tree
+    declarations = [
+        ("std::uint32_t", "TREE_OFFSETS", offsets, str),
+        ("std::int32_t", "LEFT", left, str), ("std::int32_t", "RIGHT", right, str),
+        ("std::int16_t", "FEATURES", features, str),
+        ("double", "THRESHOLDS", thresholds, lambda v: c_float(float(v))),
+        ("double", "LEAF_VALUES", values, lambda v: c_float(float(v))),
+    ]
+    body = ["// Generated by tools/train_lightgbm.py. Do not edit by hand.", "#pragma once",
+            "#include <array>", "#include <cstddef>", "#include <cstdint>",
+            "namespace silverfox_ml_model {",
+            f"inline constexpr std::size_t FEATURE_COUNT = {len(FEATURE_NAMES)};",
+            f"inline constexpr std::size_t CLASS_COUNT = {len(classes)};",
+            f"inline constexpr std::size_t TREE_COUNT = {len(offsets)};",
+            f"inline constexpr std::size_t NODE_COUNT = {len(features)};",
+            "inline constexpr std::uint64_t MIN_FILE_BYTES = 2048;",
+            f"inline constexpr double SUSPICIOUS_THRESHOLD = {c_float(suspicious)};",
+            f"inline constexpr double MALICIOUS_THRESHOLD = {c_float(malicious)};",
+            f"inline constexpr double CALIBRATION_SLOPE = {c_float(slope)};",
+            f"inline constexpr double CALIBRATION_INTERCEPT = {c_float(intercept)};",
+            f'inline constexpr const char *TRAINED_AT_UTC = "{timestamp}";',
+            "inline constexpr std::array<const char *, CLASS_COUNT> CLASS_NAMES = {",
+            *lines(classes, lambda value: f'"{value}"', 6), "};"]
+    for datatype, name, data, formatter in declarations:
+        body += [f"inline constexpr std::array<{datatype}, {'TREE_COUNT' if name=='TREE_OFFSETS' else 'NODE_COUNT'}> {name} = {{",
+                 *lines(data, formatter, 6 if datatype == "double" else 12), "};"]
+    body += ["} // namespace silverfox_ml_model", ""]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(body), encoding="utf-8", newline="\n")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=Path, default=os.environ.get("SILVERFOX_DATASET_DIR"),
+                        required=not bool(os.environ.get("SILVERFOX_DATASET_DIR")))
+    parser.add_argument("--header", type=Path, default=MODEL_HEADER)
+    parser.add_argument("--report", type=Path, default=MODEL_REPORT)
+    parser.add_argument("--booster-out", type=Path, default=MODEL_DIR / "static_ml_booster.txt")
+    parser.add_argument("--extra-safe", type=Path, action="append", default=[],
+                        help="confirmed safe PE regression sample; may be repeated")
+    parser.add_argument("--seed", type=int, default=20260925)
+    args = parser.parse_args()
+    samples, skipped = load_samples(args.dataset)
+    samples.extend(load_extra_safe(args.extra_safe))
+    samples, conflicts = remove_conflicting_duplicates(samples)
+    if not samples:
+        raise RuntimeError("no eligible PE samples")
+    families = sorted({sample.family.split("/", 1)[1] for sample in samples
+                       if sample.family.startswith("virus/") and sample.family != "virus/Generic"})
+    if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]*", name) for name in families):
+        raise RuntimeError("family directory names must be safe ASCII identifiers")
+    classes = ["Safe", "Generic", *families]
+    class_index = {name: index for index, name in enumerate(classes)}
+    labels = ["Safe" if sample.label == 0 else
+              sample.family.split("/", 1)[1] if sample.family.startswith("virus/") else "Generic"
+              for sample in samples]
+    x = np.stack([sample.features for sample in samples]).astype(np.float32)
+    y = np.asarray([class_index[label] for label in labels], np.int32)
+    binary = (y != 0).astype(np.int32)
+    groups = np.asarray([sample.group for sample in samples])
+    focus = np.asarray([sample.family.startswith("virus/") for sample in samples])
+    counts = np.bincount(y, minlength=len(classes))
+    weights = np.asarray([1.0 if label == 0 else min(12.0, max(1.0, math.sqrt(counts[1]/max(counts[label], 1))))
+                          for label in y], np.float64)
+    weights[focus] *= 2.0
+    print(json.dumps({"sample_count": len(y), "classes": dict(zip(classes, map(int, counts))),
+                      "virus_pe_samples": int(focus.sum())}, ensure_ascii=False), flush=True)
+    outer = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=args.seed)
+    develop, holdout = next(outer.split(x, binary, groups))
+    if len(set(binary[holdout])) != 2:
+        raise RuntimeError("holdout split must include safe and malicious samples")
+    tuning = []
+    for name, config in CONFIGS.items():
+        print(f"tuning {name}", flush=True)
+        oof = grouped_oof(x[develop], y[develop], binary[develop], groups[develop],
+                          weights[develop], config, args.seed + 10, len(classes))
+        p = 1 - oof[:, 0]
+        threshold = threshold_for(binary[develop], p, 0.005, 0.05)
+        metrics = point(binary[develop], p, threshold)
+        focus_recall = float(np.mean(p[focus[develop]] >= threshold)) if focus[develop].any() else 0.0
+        tuning.append((metrics["recall"] + 0.10*focus_recall, name, config, oof, metrics))
+        print(json.dumps({"candidate": name, "metrics": metrics, "virus_recall": focus_recall}, ensure_ascii=False), flush=True)
+    _, best_name, best_config, dev_oof, _ = max(tuning, key=lambda item: (item[0], -item[4]["false_positive"]))
+    dev_raw = 1 - dev_oof[:, 0]
+    margin = np.log(np.clip(dev_raw, 1e-7, 1-1e-7) / np.clip(1-dev_raw, 1e-7, 1-1e-7)).reshape(-1, 1)
+    calibrator = LogisticRegression(max_iter=500).fit(margin, binary[develop])
+    slope = float(calibrator.coef_[0, 0]); intercept = float(calibrator.intercept_[0])
+    if slope <= 0:
+        raise RuntimeError("calibration reversed model ranking")
+    dev_probability = calibrate(dev_raw, slope, intercept)
+    suspicious = threshold_for(binary[develop], dev_probability, 0.005, 0.01)
+    malicious = threshold_for(binary[develop], dev_probability, 0.0035, max(suspicious, 0.9))
+    provisional = model(args.seed + 100, best_config)
+    provisional.fit(x[develop], y[develop], sample_weight=weights[develop])
+    holdout_classes = probabilities(provisional, x[holdout], len(classes))
+    holdout_raw = 1 - holdout_classes[:, 0]
+    holdout_probability = calibrate(holdout_raw, slope, intercept)
+    final = model(args.seed, best_config)
+    final.fit(x, y, sample_weight=weights)
+    args.booster_out.parent.mkdir(parents=True, exist_ok=True)
+    final.booster_.save_model(str(args.booster_out))
+    tree = flatten(final.booster_)
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    write_header(args.header, tree, classes, suspicious, malicious, slope, intercept, timestamp)
+    predicted_family = holdout_classes[:, 1:].argmax(axis=1) + 1
+    family_holdout = (y[holdout] > 1)
+    report = {
+        "model": "LightGBM single multiclass GBDT", "trained_at_utc": timestamp,
+        "dataset": str(args.dataset), "feature_count": len(FEATURE_NAMES), "feature_names": FEATURE_NAMES,
+        "extra_safe_paths": [str(path) for path in args.extra_safe],
+        "class_names": classes, "class_counts": dict(zip(classes, map(int, counts))),
+        "sample_count": len(y), "final_fit_count": len(y), "virus_pe_samples": int(focus.sum()),
+        "tree_count": len(tree[0]), "node_count": len(tree[3]), "supported_input": "valid_pe_only",
+        "evaluation": "grouped development folds and untouched grouped holdout before final all-sample fit",
+        "selected_config": best_name, "candidate_configs": CONFIGS,
+        "calibration": {"method": "sigmoid_on_development_oof", "slope": slope, "intercept": intercept,
+                        "raw_brier": float(brier_score_loss(binary[develop], dev_raw)),
+                        "calibrated_brier": float(brier_score_loss(binary[develop], dev_probability))},
+        "development_suspicious_operating_point": point(binary[develop], dev_probability, suspicious),
+        "development_malicious_operating_point": point(binary[develop], dev_probability, malicious),
+        "holdout_count": len(holdout),
+        "holdout_roc_auc": float(roc_auc_score(binary[holdout], holdout_probability)),
+        "holdout_average_precision": float(average_precision_score(binary[holdout], holdout_probability)),
+        "holdout_suspicious_operating_point": point(binary[holdout], holdout_probability, suspicious),
+        "holdout_malicious_operating_point": point(binary[holdout], holdout_probability, malicious),
+        "holdout_virus_recall": float(np.mean(holdout_probability[focus[holdout]] >= suspicious)) if focus[holdout].any() else None,
+        "holdout_named_family_accuracy": float(np.mean(predicted_family[family_holdout] == y[holdout][family_holdout])) if family_holdout.any() else None,
+        "skipped": skipped, "conflicting_duplicate_groups_removed": conflicts,
+        "out_of_fold_samples": [
+            {"path": str(samples[i].path), "label": int(binary[i]), "family": samples[i].family,
+             "probability": float(dev_probability[j]), "predicted_family": classes[int(dev_oof[j, 1:].argmax()+1)],
+             "group": samples[i].group, "split": "development"}
+            for j, i in enumerate(develop)] + [
+            {"path": str(samples[i].path), "label": int(binary[i]), "family": samples[i].family,
+             "probability": float(holdout_probability[j]), "predicted_family": classes[int(predicted_family[j])],
+             "group": samples[i].group, "split": "holdout"}
+            for j, i in enumerate(holdout)]}
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({key: report[key] for key in
+                      ("sample_count", "class_counts", "selected_config", "holdout_suspicious_operating_point",
+                       "holdout_virus_recall", "holdout_named_family_accuracy")}, ensure_ascii=False, indent=2), flush=True)
+
+
+if __name__ == "__main__":
+    main()

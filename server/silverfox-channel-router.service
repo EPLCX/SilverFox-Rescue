@@ -1,0 +1,18 @@
+[Unit]
+Description=SilverFox update channel selection
+After=network.target
+
+[Service]
+Type=simple
+User=nginx
+WorkingDirectory=/opt/silverfox-rescue
+ExecStart=/usr/bin/python3 -B /opt/silverfox-rescue/server/app/channel_router.py --root /opt/silverfox-rescue/runtime/public --port 18081
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

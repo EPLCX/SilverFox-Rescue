@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">银狐专杀急救箱</title>
+  <desc id="desc">蓝色急救箱与右下角被禁止标记阻止的银狐</desc>
+
+  <!-- The master artwork is vector; the surrounding space is transparent. -->
+  <path d="M145 157v-41c0-24 19-43 43-43h106c24 0 43 19 43 43v41h-35v-40c0-5-4-9-9-9H189c-5 0-9 4-9 9v40z" fill="#0878e8" stroke="#063982" stroke-width="9" stroke-linejoin="round"/>
+  <rect x="40" y="158" width="397" height="291" rx="43" fill="#0751bd" stroke="#063982" stroke-width="11"/>
+  <path d="M83 158h311c24 0 43 19 43 43v48H40v-48c0-24 19-43 43-43z" fill="#117df1" stroke="#063982" stroke-width="11" stroke-linejoin="round"/>
+  <path d="M46 262h381" stroke="#05357b" stroke-width="11"/>
+  <rect x="96" y="221" width="47" height="62" rx="10" fill="#66cbff" stroke="#063982" stroke-width="9"/>
+  <rect x="333" y="221" width="47" height="62" rx="10" fill="#66cbff" stroke="#063982" stroke-width="9"/>
+  <path d="M180 269h50v-50h54v50h50v54h-50v50h-54v-50h-50z" fill="#fff" stroke="#063982" stroke-width="9" stroke-linejoin="round"/>
+
+  <!-- The badge sits in front of the case, while the slash sits in front of the fox. -->
+  <circle cx="380" cy="377" r="103" fill="#063982"/>
+  <circle cx="380" cy="377" r="86" fill="#063982" stroke="#1593fa" stroke-width="17"/>
+  <g fill="#ecf3fb">
+    <path d="M324 393c13-25 37-35 58-38 21-1 43 7 59 25-12 14-28 22-43 24-10 21-24 34-43 38 9-12 12-24 11-34-11 5-24 2-42-15z"/>
+    <path d="M348 350l2-46 31 36 20-42 12 52-32 17z"/>
+    <path d="M329 400c-18 8-27 19-32 35 18-8 37-10 55-3z"/>
+  </g>
+  <path d="M402 374l12 3-10 4z" fill="#063982"/>
+  <path d="M318 315l123 123" stroke="#063982" stroke-width="28" stroke-linecap="round"/>
+  <path d="M318 315l123 123" stroke="#1593fa" stroke-width="17" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,12 @@
+services:
+  web:
+    build: ./server
+    ports:
+      - "8080:80"
+    volumes:
+      - ./runtime/server/data/public:/usr/share/nginx/html/public:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    restart: unless-stopped
