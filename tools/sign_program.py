@@ -110,13 +110,12 @@ def sign_bytes(data: bytes, key: Ed25519PrivateKey, public_key: Ed25519PublicKey
     if derived != expected:
         raise ValueError("private key does not match the public key")
     offset = signature_offset(data)
-    if any(data[offset + 12:offset + 108]):
-        raise ValueError("input is already signed")
     if kind == "engine":
         if not version or len(version) > 19 or not all(ch.isdigit() or ch == "." for ch in version):
             raise ValueError("engine rule version must be 1-19 ASCII digits or dots")
         data = bytearray(data)
         data[offset + 8] = 2
+        data[offset + 108:offset + 128] = bytes(20)
         data[offset + 108] = len(version)
         data[offset + 109:offset + 109 + len(version)] = version.encode("ascii")
         data = bytes(data)
@@ -140,8 +139,20 @@ def publisher_modules():
     from app import publish_program, publish_rules
     return publish_program, publish_rules
 
-RULE_VERSION = json.loads((RULE_SEED_DIR / "rules.manifest.json").read_text("utf-8"))["version"]
 PROGRAM_VERSION = re.search(r'const CLIENT_VERSION:&str="([^"]+)"', (ROOT / "src/main.rs").read_text("utf-8")).group(1)
+
+
+def default_rule_version() -> str:
+    manifest_path = RULE_SEED_DIR / "rules.manifest.json"
+    if manifest_path.is_file():
+        return json.loads(manifest_path.read_text("utf-8"))["version"]
+    source_path = ROOT / "engine/algorithms.cpp"
+    if source_path.is_file():
+        match = re.search(r'\bsf_engine_version\s*\(\s*\)\s*\{\s*return\s*"([0-9.]+)"\s*;',
+                          source_path.read_text("utf-8"))
+        if match:
+            return match.group(1)
+    return ""
 
 
 def ask(label: str, default: str = "") -> str:
@@ -195,10 +206,7 @@ def sign_pe(kind: str) -> None:
     public, secret = key_pair("program" if kind == "program" else "rules", private=True)
     source = path("待签名文件", TARGET_ROOT / "release/silverfox-rescue.exe" if kind == "program" else ENGINE_DLL)
     target = path("签名输出文件", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.exe" if kind == "program" else ENGINE_DLL)
-    version = ask("规则版本", RULE_VERSION) if kind == "engine" else None
-    if not confirm_replace(target):
-        print("已取消。")
-        return
+    version = ask("规则版本", default_rule_version()) if kind == "engine" else None
     signed = sign_bytes(source.read_bytes(), secret, public, kind, version)
     atomic_write(target, signed)
     print(f"签名完成：{target}\nSHA-256: {hashlib.sha256(signed).hexdigest()}")
@@ -207,7 +215,7 @@ def sign_pe(kind: str) -> None:
 def verify_signed_pe(kind: str) -> None:
     public, _ = key_pair("program" if kind == "program" else "rules")
     file = path("签名文件", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.exe" if kind == "program" else ENGINE_DLL)
-    version = ask("规则版本", RULE_VERSION) if kind == "engine" else None
+    version = ask("规则版本", default_rule_version()) if kind == "engine" else None
     verify_pe(file.read_bytes(), public, kind, version)
     print(f"签名有效：{file}")
 
@@ -239,7 +247,7 @@ def publish_rule_package() -> None:
     _, publish_rules = publisher_modules()
     _, secret = key_pair("rules", private=True)
     engine = path("算法 DLL（未签名时会在此文件填入签名）", ENGINE_DLL)
-    version = ask("规则版本", RULE_VERSION)
+    version = ask("规则版本", default_rule_version())
     channel = ask("通道 stable/beta", "stable")
     url = ask("公开站点基址", CLOUD_URL)
     output = path("输出目录", DIST_DIR / "publishRules")

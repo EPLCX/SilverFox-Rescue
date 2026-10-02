@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from sign_program import sign_bytes, verify
+from sign_program import atomic_write, sign_bytes, verify
 
 
 def verify_engine_export_version(engine: Path, expected_version: str) -> None:
@@ -32,14 +32,10 @@ def sign_engine_section(engine: Path, key: Ed25519PrivateKey, version: str) -> b
     if len(body) < 1024 or not body.startswith(b"MZ"):
         raise SystemExit("algorithms.dll is not a valid PE image")
     verify_engine_export_version(engine, version)
-    from sign_program import signature_offset
-    slot = signature_offset(body)
-    if any(body[slot + 12:slot + 108]):
-        verify(body, key.public_key(), "engine", version)
-        return body
     signed = sign_bytes(body, key, key.public_key(), "engine", version)
     verify(signed, key.public_key(), "engine", version)
-    engine.write_bytes(signed)
+    if signed != body:
+        atomic_write(engine, signed)
     return signed
 
 
@@ -65,4 +61,3 @@ def publish(version: str, key: Ed25519PrivateKey, output: Path, public_base_url:
     manifest_path = channel_output / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), "utf-8")
     return package, manifest_path
-
