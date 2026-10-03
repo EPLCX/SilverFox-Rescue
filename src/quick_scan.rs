@@ -4,14 +4,15 @@ use crate::{model::{Finding, Verdict}, scanner::Scanner, AppState};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, fs, path::{Path, PathBuf}, ptr::{null, null_mut},
+use std::{collections::{HashSet,HashMap}, fs, path::{Path, PathBuf}, ptr::{null, null_mut},
     sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use windows_sys::Win32::System::Registry::*;
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct Entry {
     kind: String, location: String, command: String, working: String, profile: String,
     view: String, hive: String, key: String, value: String,
+    #[serde(default)] fingerprint: String,
     #[serde(default)] image: String,
     #[serde(default)] filter: String,
     #[serde(default)] excluded_filters: Vec<String>,
@@ -96,7 +97,7 @@ fn read_run_keys(root: HKEY, prefix: &str, profile: &str, view: u32, entries: &m
             if let Some(key) = Key::open(root, &full, KEY_READ|view)? {
                 for name in key.names()? {
                     if let Some(command) = key.string(&name)?.filter(|text|!text.trim().is_empty()) {
-                        entries.push(Entry { kind:"startup".into(), location:format!("{}\\{}\\{}",if root==HKEY_LOCAL_MACHINE{"HKLM"}else{"HKU"},full,name), command, profile:profile.into(), ..Entry::default() });
+                        entries.push(Entry { kind:"startup".into(), location:format!("{}\\{}\\{}",if root==HKEY_LOCAL_MACHINE{"HKLM"}else{"HKU"},full,name), command, profile:profile.into(),view:view.to_string(),hive:if root==HKEY_LOCAL_MACHINE{"HKLM"}else{"HKU"}.into(),key:full.clone(),value:name, ..Entry::default() });
                     }
                 }
             }
@@ -198,7 +199,7 @@ fn shortcut(path: &Path) -> Result<Entry> {
             (*link).GetArguments(args.as_mut_ptr(),args.len() as i32);
             (*link).GetWorkingDirectory(working.as_mut_ptr(),working.len() as i32);
             let text = |wide: &[u16]|String::from_utf16_lossy(&wide[..wide.iter().position(|word|*word==0).unwrap_or(wide.len())]);
-            Ok(Entry { kind:"startup".into(),location:path.display().to_string(),command:format!("\"{}\" {}",text(&target),text(&args)),working:text(&working),..Entry::default() })
+            Ok(Entry { kind:"startup".into(),location:path.display().to_string(),command:format!("\"{}\" {}",text(&target),text(&args)),working:text(&working),fingerprint:hex::encode(Sha256::digest(fs::read(path)?)),..Entry::default() })
         })();
         (*link).Release();
         result
@@ -268,6 +269,7 @@ fn file_inventory(entries: &mut Vec<Entry>, findings: &mut Vec<Finding>, cancel:
                     let bytes=fs::read(item.path())?;
                     if bytes.len()>4*1024*1024 { anyhow::bail!("计划任务文件超过 4 MiB"); }
                     for mut entry in task_actions(&decode_hosts(&bytes),&item.path().display().to_string())? {
+                        entry.fingerprint=hex::encode(Sha256::digest(&bytes));
                         if !entry.key.is_empty() {
                             for view in [KEY_WOW64_64KEY,KEY_WOW64_32KEY] {
                                 if let Some(key)=Key::open(HKEY_CLASSES_ROOT,&format!(r"CLSID\{}\InprocServer32",entry.key),KEY_READ|view)? {
@@ -468,7 +470,7 @@ pub fn scan(scanner: &Scanner, app: &Arc<AppState>) -> Vec<Finding> {
     app.progress_total.store(entries.len()+1+policy_paths.len(), Ordering::Relaxed);
     app.progress_done.store(0, Ordering::Relaxed);
     app.progress_mode.store(2, Ordering::Release);
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::<String,usize>::new();
     for (index, entry) in entries.iter().enumerate() {
         if app.scan_cancel.load(Ordering::Acquire) { return findings; }
         *app.current_path.lock().unwrap_or_else(|error|error.into_inner()) = entry.location.clone();
@@ -484,11 +486,13 @@ pub fn scan(scanner: &Scanner, app: &Arc<AppState>) -> Vec<Finding> {
             }
             for path in referenced_paths(entry) {
                 if app.scan_cancel.load(Ordering::Acquire) { return findings; }
-                if !seen.insert(path.to_string_lossy().to_ascii_lowercase()) { continue; }
+                let key=Scanner::path_key(&path);
+                if let Some(&index)=seen.get(&key){attach_reference(&mut findings[index],entry); continue; }
                 *app.current_path.lock().unwrap_or_else(|error|error.into_inner()) = path.display().to_string();
                 if let Some(mut finding) = scanner.scan_file_cancellable(&path, &app.scan_cancel) {
                     if finding.unsupported_non_pe() { continue; }
-                    finding.evidence.push(format!("{}引用：{}", match entry.kind.as_str(){"task"=>"计划任务","ifeo"=>"IFEO",_=>"启动项"}, entry.location));
+                    attach_reference(&mut finding,entry);
+                    seen.insert(key,findings.len());
                     findings.push(finding);
                 }
             }
@@ -513,6 +517,63 @@ pub fn scan(scanner: &Scanner, app: &Arc<AppState>) -> Vec<Finding> {
         }
     }
     findings
+}
+
+fn attach_reference(finding:&mut Finding,entry:&Entry){
+    let mut entries:Vec<Entry>=finding.source.strip_prefix("quick-references:").and_then(|s|serde_json::from_str(s).ok()).unwrap_or_default();
+    if !entries.contains(entry){entries.push(entry.clone());finding.evidence.push(format!("{}引用：{}",match entry.kind.as_str(){"task"=>"计划任务","ifeo"=>"IFEO",_=>"启动项"},entry.location));}
+    finding.source=format!("quick-references:{}",serde_json::to_string(&entries).unwrap());
+}
+
+pub fn remove_references(finding:&Finding,cancel:&AtomicBool)->Result<Vec<String>>{
+    use std::os::windows::process::CommandExt;
+    let entries:Vec<Entry>=if let Some(record)=finding.source.strip_prefix("quick-references:"){serde_json::from_str(record)?}else{
+        let mut entries=Vec::new();let mut errors=Vec::new();
+        registry_inventory(&mut entries,&mut errors,cancel);file_inventory(&mut entries,&mut errors,cancel);
+        let target=Scanner::path_key(&finding.path);
+        entries.into_iter().filter(|entry|referenced_paths(entry).iter().any(|path|Scanner::path_key(path)==target)).collect()
+    };
+    let mut messages=Vec::new();let mut removed=HashSet::new();
+    for entry in entries {
+        if cancel.load(Ordering::Acquire){anyhow::bail!("处理已取消");}
+        let identity=format!("{}:{}:{}:{}",entry.location,entry.view,entry.key,entry.value);
+        if !removed.insert(identity){continue;}
+        let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join(r"SilverFoxRescue\repairs");
+        fs::create_dir_all(&backup)?;
+        let record=serde_json::to_vec(&entry)?;
+        let digest=hex::encode(Sha256::digest(&record));
+        if !entry.hive.is_empty(){
+            let root=match entry.hive.as_str(){"HKLM"=>HKEY_LOCAL_MACHINE,"HKU"=>HKEY_USERS,_=>anyhow::bail!("启动项注册表位置无效")};
+            let view:u32=entry.view.parse()?;
+            let Some(key)=Key::open(root,&entry.key,KEY_QUERY_VALUE|KEY_SET_VALUE|view)?else{continue;};
+            let Some(command)=key.string(&entry.value)?else{continue;};
+            if command!=entry.command{anyhow::bail!("启动项已变化：{}",entry.location);}
+            fs::write(backup.join(format!("reference-{digest}.json")),&record)?;
+            let status=unsafe{RegDeleteValueW(key.0,crate::wide(&entry.value).as_ptr())};
+            if status!=0{return Err(std::io::Error::from_raw_os_error(status as i32).into());}
+        }else{
+            let path=Path::new(&entry.location);
+            if !path.try_exists()?{continue;}
+            let bytes=fs::read(path)?;
+            if hex::encode(Sha256::digest(&bytes))!=entry.fingerprint{anyhow::bail!("引用已变化：{}",entry.location);}
+            fs::write(backup.join(format!("reference-{digest}.json")),&record)?;
+            fs::write(backup.join(format!("reference-{digest}.bak")),bytes)?;
+            if entry.kind=="task"{
+                let root=std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(||r"C:\Windows".into()).join(r"System32\Tasks");
+                let task=task_name(path,&root)?;
+                let output=std::process::Command::new(root.parent().unwrap().join("schtasks.exe")).args(["/Delete","/TN",&task,"/F"]).creation_flags(0x08000000).output()?;
+                if !output.status.success(){anyhow::bail!("删除计划任务失败：{} {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));}
+            }else if entry.kind=="startup"{fs::remove_file(path)?;}else{continue;}
+        }
+        messages.push(format!("已移除{}引用：{}",if entry.kind=="task"{"计划任务"}else{"启动项"},entry.location));
+    }
+    Ok(messages)
+}
+
+fn task_name(path:&Path,root:&Path)->Result<String>{
+    let relative=path.strip_prefix(root).context("计划任务位置无效")?;
+    if relative.as_os_str().is_empty()||relative.components().any(|part|!matches!(part,std::path::Component::Normal(_))){anyhow::bail!("计划任务位置无效");}
+    Ok(format!("\\{}",relative.display()))
 }
 
 fn decode_hosts(bytes: &[u8]) -> String {
@@ -571,4 +632,16 @@ pub fn repair_configuration(finding: &Finding, cancel: &AtomicBool) -> Result<bo
     };
     fs::write(&finding.path, repaired)?;
     Ok(true)
+}
+
+#[cfg(test)]mod reference_tests{
+    use super::*;
+    #[test]fn duplicate_sample_retains_all_distinct_references(){
+        let mut finding=Finding{path:r"C:\sample.exe".into(),sha256:None,verdict:Verdict::Malicious,score:100,evidence:vec![],source:"local".into()};
+        let first=Entry{kind:"task".into(),location:r"C:\Windows\System32\Tasks\one".into(),..Entry::default()};
+        let second=Entry{kind:"startup".into(),location:"HKLM Run".into(),..Entry::default()};
+        attach_reference(&mut finding,&first);attach_reference(&mut finding,&second);attach_reference(&mut finding,&first);
+        let entries:Vec<Entry>=serde_json::from_str(finding.source.strip_prefix("quick-references:").unwrap()).unwrap();assert_eq!(entries.len(),2);assert_eq!(entries[0].location,first.location);assert_eq!(entries[1].location,second.location);
+    }
+    #[test]fn nested_task_name_uses_scheduler_path(){let root=Path::new(r"C:\Windows\System32\Tasks");assert_eq!(task_name(&root.join(r"Folder\Task"),root).unwrap(),r"\Folder\Task");assert!(task_name(Path::new(r"C:\other\Task"),root).is_err());assert!(task_name(&root.join(r"..\outside"),root).is_err());}
 }

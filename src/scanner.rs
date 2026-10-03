@@ -25,7 +25,7 @@ pub fn register_scan_io_thread()->Option<ActiveIoThread>{unsafe{let process=GetC
 
 struct ProcessCacheEntry { length:u64, modified:Option<SystemTime>, scanned_at:Instant, finding:Finding }
 
-pub struct Scanner { version:String, engine:crate::engine_host::Engine, process_cache:Mutex<HashMap<String,ProcessCacheEntry>> }
+pub struct Scanner { version:String, engine:crate::engine_host::Engine, process_cache:Mutex<HashMap<String,ProcessCacheEntry>>, file_cache:Mutex<HashMap<String,Arc<Mutex<Option<Finding>>>>>, session_dedup:AtomicBool }
 
 pub fn verify_signed_package()->Result<(crate::updater::Manifest,crate::updater::VerifiedRulePackage)>{
     let (embedded_manifest,embedded_bytes)=crate::updater::embedded_engine()?;
@@ -46,8 +46,9 @@ impl Scanner {
     pub fn load() -> Result<Self> {
         let (manifest,verified)=verify_signed_package()?;
         let engine=crate::engine_host::Engine::load(&verified.engine,&manifest.version)?;
+        crate::updater::set_current_rule_version(&manifest.version);
         crate::gpu_scan::initialize();
-        Ok(Self { version:manifest.version,engine,process_cache:Mutex::new(HashMap::new()) })
+        Ok(Self { version:manifest.version,engine,process_cache:Mutex::new(HashMap::new()),file_cache:Mutex::new(HashMap::new()),session_dedup:AtomicBool::new(false) })
     }
 
     pub fn rule_version(&self) -> &str { &self.version }
@@ -98,15 +99,37 @@ impl Scanner {
         }
     }
 
+    pub fn enable_session_dedup(&self){self.session_dedup.store(true,Ordering::Relaxed);}
+
+    pub fn path_key(path:&Path)->String {
+        std::fs::canonicalize(path).unwrap_or_else(|_|path.to_owned()).to_string_lossy().trim_start_matches(r"\\?\").to_lowercase()
+    }
+
+    pub fn already_scanned(&self,path:&Path)->bool {
+        let slot=self.file_cache.lock().unwrap_or_else(|e|e.into_inner()).get(&Self::path_key(path)).cloned();
+        slot.is_some_and(|slot|slot.lock().unwrap_or_else(|e|e.into_inner()).is_some())
+    }
+
     pub fn scan_file_cancellable(&self, path: &Path, cancelled:&AtomicBool) -> Option<Finding> {
         if cancelled.load(Ordering::Acquire) { return None; }
         if crate::quarantine::is_quarantine_path(path) {
             return Some(Finding { path: path.into(), sha256: None, verdict: Verdict::Clean, score: 0, evidence: vec!["隔离区对象，已排除扫描".into()], source: "local".into() });
         }
-        match self.scan_file_inner(path, Some(cancelled)) {
+        if !self.session_dedup.load(Ordering::Relaxed){return match self.scan_file_inner(path,Some(cancelled)){
+            Ok(finding)=>finding,
+            Err(error)=>Some(Finding{path:path.into(),sha256:None,verdict:Verdict::Incomplete,score:0,evidence:vec![error.to_string()],source:"local".into()}),
+        };}
+        let slot=self.file_cache.lock().unwrap_or_else(|e|e.into_inner()).entry(Self::path_key(path)).or_insert_with(||Arc::new(Mutex::new(None))).clone();
+        // One lock per sample keeps workers parallel while duplicate paths wait for its verdict.
+        let mut cached=slot.lock().unwrap_or_else(|e|e.into_inner());
+        if cancelled.load(Ordering::Acquire){return None;}
+        if let Some(finding)=cached.as_ref(){let mut finding=finding.clone();finding.path=path.into();return Some(finding);}
+        let finding=match self.scan_file_inner(path, Some(cancelled)) {
             Ok(finding) => finding,
             Err(error) => Some(Finding { path: path.into(), sha256: None, verdict: Verdict::Incomplete, score: 0, evidence: vec![error.to_string()], source: "local".into() }),
-        }
+        };
+        if let Some(finding)=finding.as_ref(){if finding.sha256.is_some()||finding.unsupported_non_pe()||finding.verdict==Verdict::Clean{*cached=Some(finding.clone());}}
+        finding
     }
 
     fn scan_file_inner(&self, path: &Path, cancelled:Option<&AtomicBool>) -> Result<Option<Finding>> {
@@ -528,4 +551,21 @@ mod tests {
     }
     #[test] #[ignore="requires a manually reviewed sample corpus"] fn provided_yh3_structural_samples_are_detected_when_available(){let scanner=Scanner::load().unwrap();for name in ["fpj0KBKa.dat.virus","fpj0KBKa.exe.virus","fpj0KBKa.png.virus"]{let path=PathBuf::from(r"C:\Users\Administrator\Desktop\yh_3").join(name);if path.is_file(){let finding=scanner.scan_file(&path);assert_eq!(finding.verdict,Verdict::Malicious,"{} score={} evidence={:?}",path.display(),finding.score,finding.evidence);}}}
     #[test] #[ignore="manual evaluation of a mixed-provenance sample collection"] fn collected_executable_and_payload_regressions_when_available(){let root=PathBuf::from(r"C:\Users\Administrator\Desktop\SilverFoxCollected");let scanner=Scanner::load().unwrap();for name in ["222222.exe.silverfox-suspected","3ybDxnfXme.exe.silverfox-suspected","Eixh.62.silverfox-suspected","IC7mN6sa.dll.silverfox-suspected","Project-rd.zip.silverfox-suspected","ranchserv.jpg.silverfox-suspected"]{let path=root.join(name);if path.is_file(){let finding=scanner.scan_file(&path);assert_eq!(finding.verdict,Verdict::Malicious,"{} score={} evidence={:?}",path.display(),finding.score,finding.evidence);}}for name in ["config.ini.silverfox-suspected","Server.log.silverfox-suspected"]{let path=root.join(name);if path.is_file(){let finding=scanner.scan_file(&path);assert_eq!(finding.verdict,Verdict::Clean,"{} evidence={:?}",path.display(),finding.evidence);}}}
+}
+
+#[cfg(test)]mod session_dedup_tests{
+    use super::*;
+    #[test]fn session_reuses_scanned_path_but_fresh_scan_reads_changes(){
+        let scanner=Scanner::load().unwrap();scanner.enable_session_dedup();
+        let root=std::env::temp_dir().join(format!("silverfox-session-dedup-{}",std::process::id()));std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("sample.bin");std::fs::write(&path,b"ordinary bytes").unwrap();
+        let cancel=AtomicBool::new(false);let first=scanner.scan_file_cancellable(&path,&cancel).unwrap();assert!(scanner.already_scanned(&path));
+        std::fs::write(&path,b"MZ").unwrap();
+        let alias=root.join(".").join("sample.bin");let cached=scanner.scan_file_cancellable(&alias,&cancel).unwrap();assert_eq!(first.evidence,cached.evidence);
+        let fresh=scanner.scan_file(&path);assert_ne!(fresh.evidence,first.evidence);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]fn cancellation_does_not_claim_path(){
+        let scanner=Scanner::load().unwrap();scanner.enable_session_dedup();let path=std::env::current_exe().unwrap();assert!(scanner.scan_file_cancellable(&path,&AtomicBool::new(true)).is_none());assert!(!scanner.already_scanned(&path));
+    }
 }

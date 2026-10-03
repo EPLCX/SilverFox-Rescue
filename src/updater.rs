@@ -16,6 +16,10 @@ const EMBEDDED_ENGINE:&[u8]=include_bytes!("../engine/algorithms.dll");
 const EMBEDDED_MANIFEST:&[u8]=include_bytes!("../rules/seed/rules.manifest.json");
 const EMBEDDED_PACKAGE:&[u8]=include_bytes!("../rules/seed/rules.package.zip");
 
+static CURRENT_RULE_VERSION:std::sync::Mutex<String>=std::sync::Mutex::new(String::new());
+pub fn current_rule_version()->String{CURRENT_RULE_VERSION.lock().unwrap_or_else(|error|error.into_inner()).clone()}
+pub(crate) fn set_current_rule_version(version:&str){*CURRENT_RULE_VERSION.lock().unwrap_or_else(|error|error.into_inner())=version.to_owned();}
+
 pub fn embedded_engine()->Result<(Manifest,&'static [u8])>{
     let manifest:Manifest=serde_json::from_slice(EMBEDDED_MANIFEST).context("内嵌算法清单无效")?;
     let verified=verified_rules_from_package(EMBEDDED_PACKAGE,&manifest).context("内嵌签名病毒库无效")?;
@@ -234,6 +238,7 @@ pub fn update(base_url:&str)->Result<String>{
     if !url.starts_with("https://") && !base_url.starts_with("http://127.0.0.1") { anyhow::bail!("规则下载必须使用 HTTPS"); }
     let reader=crate::cloud::https_agent()?.get(&url).call().context("规则下载失败")?.into_reader();let mut bytes=Vec::new();reader.take(8*1024*1024).read_to_end(&mut bytes)?;
     install_verified_package(&bytes,&manifest)?;
+    set_current_rule_version(&manifest.version);
     Ok(format!("规则已更新到 {}",manifest.version))
 }
 

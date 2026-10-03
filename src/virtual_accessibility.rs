@@ -44,7 +44,7 @@ pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
         let heading=match mode{0=>"银狐专杀急救箱".to_string(),1=>visible_scan_operation(),2=>{let count=state().threat_count.load(Ordering::Relaxed);if count==0{"未发现威胁".into()}else{format!("发现 {count} 个威胁")}},3=>match subpage{PAGE_QUARANTINE=>"隔离区",PAGE_REPORT=>"扫描报告",PAGE_UPDATE=>"规则更新",PAGE_SETTINGS=>"设置与保护状态",PAGE_PROGRAM_UPDATE=>"程序更新",_=>"功能页面"}.into(),UI_MODE_REMEDIATION_DONE=>"扫描结果".into(),_=>String::new()};
         if !heading.is_empty(){result.push(item(ID_PAGE_HEADING,heading,ROLE_SYSTEM_TEXT,if mode==0{RECT{left:s(24),top:s(145),right:client.right-s(24),bottom:s(205)}}else if mode==1{scan_text_rects(&client,dpi).0}else{RECT{left:s(24),top:s(58),right:client.right-s(24),bottom:s(100)}},false));}
         if mode==0{let operation=state().operation.lock().unwrap_or_else(|error|error.into_inner()).clone();let subtitle=if operation.starts_with("扫描成功")||operation.starts_with("扫描完成")||operation.starts_with("扫描已取消"){operation}else{"快速查杀银狐木马".into()};result.push(item(ID_PAGE_DETAIL,subtitle,ROLE_SYSTEM_TEXT,RECT{left:s(24),top:s(210),right:client.right-s(24),bottom:s(245)},false));}
-        result.push(item(ID_VERSION_TEXT,format!("当前版本：{}",CLIENT_VERSION),ROLE_SYSTEM_TEXT,RECT{left:s(24),top:client.bottom-s(45),right:s(190),bottom:client.bottom},false));
+        result.push(item(ID_VERSION_TEXT,version_footer_text(),ROLE_SYSTEM_TEXT,RECT{left:s(24),top:client.bottom-s(45),right:s(360).min(client.right-s(24)),bottom:client.bottom},false));
         if mode==1{
             result.push(item(ID_PAGE_DETAIL,scan_status_summary(),ROLE_SYSTEM_PROGRESSBAR,scan_text_rects(&client,dpi).1,false));
             for (index,line) in visible_scan_activity().into_iter().enumerate(){result.push(item(ID_PAGE_ACTIVITY+index,line,ROLE_SYSTEM_TEXT,RECT{left:s(46),top:s(162+index as i32*27),right:client.right-s(46),bottom:s(187+index as i32*27)},false));}
@@ -57,12 +57,12 @@ pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
             let list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let area_top=s(105);let row_height=s(26).max(1);let visible=((client.bottom-s(140)-area_top-s(8))/row_height).max(0)as usize;
             for (slot,line) in list.lines.iter().skip(list.scroll).take(visible).enumerate(){let index=list.scroll+slot;let mut entry=item(1000+index,line.clone(),ROLE_SYSTEM_LISTITEM,RECT{left:s(27),top:area_top+s(4)+slot as i32*row_height,right:client.right-s(27),bottom:area_top+s(4)+(slot as i32+1)*row_height},true);entry.selected=list.selected==Some(index);result.push(entry);}
         }else if mode==2{
-            let indices=alert_indices();let selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());let findings=state().findings.lock().unwrap_or_else(|error|error.into_inner());let start=state().result_scroll.load(Ordering::Relaxed);let row_height=s(56).max(1);let visible=((client.bottom-s(130)-s(120))/row_height).max(0)as usize;
-            for (slot,index) in indices.iter().skip(start).take(visible).enumerate(){if let Some(f)=findings.get(*index){let mut entry=item(ID_FINDING_FIRST+slot,format!("{}，{}。{}",f.verdict.zh(),f.path.display(),f.evidence.join("；")),ROLE_SYSTEM_CHECKBUTTON,RECT{left:s(30),top:s(120)+slot as i32*row_height,right:client.right-s(30),bottom:s(168)+slot as i32*row_height},true);entry.checked=selected.contains(index);result.push(entry);}}
+            let indices=alert_indices();let selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());let findings=state().findings.lock().unwrap_or_else(|error|error.into_inner());let offset=state().result_scroll.load(Ordering::Relaxed);let row_height=s(56).max(1);let start=offset/row_height as usize;let remainder=(offset%row_height as usize)as i32;let visible=(((client.bottom-s(130)-s(120)).max(0)+remainder+row_height-1)/row_height)as usize;
+            for (slot,index) in indices.iter().skip(start).take(visible).enumerate(){if let Some(f)=findings.get(*index){let mut entry=item(ID_FINDING_FIRST+slot,format!("{}，{}。{}",f.verdict.zh(),f.path.display(),f.evidence.join("；")),ROLE_SYSTEM_CHECKBUTTON,RECT{left:s(30),top:(s(120)+slot as i32*row_height-remainder).max(s(120)),right:client.right-s(30),bottom:(s(168)+slot as i32*row_height-remainder).min(client.bottom-s(130))},true);entry.checked=selected.contains(index);result.push(entry);}}
         }
         if mode==UI_MODE_REMEDIATION_DONE{result.push(item(ID_PAGE_DETAIL,state().operation.lock().unwrap_or_else(|error|error.into_inner()).clone(),ROLE_SYSTEM_TEXT,RECT{left:s(24),top:s(168),right:client.right-s(24),bottom:s(210)},false));}
     }
-    for (id,rect) in virtual_buttons(hwnd){let name=match id{ID_MINIMIZE=>"最小化".into(),ID_CLOSE=>"关闭".into(),ID_QUICK=>"开始快速扫描".into(),ID_CANCEL=>"停止扫描".into(),ID_MORE=>"功能菜单".into(),ID_DONE=>if mode==UI_MODE_REMEDIATION_DONE{"完成".into()}else{"立即处理已勾选".into()},ID_SKIP=>if mode==3&&subpage==PAGE_SETTINGS{"恢复默认".into()}else if mode==UI_MODE_REMEDIATION_DONE{"查看隔离区".into()}else{"暂不处理".into()},ID_BACK=>"返回".into(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".into(),ID_DIRECTORY_CANCEL=>"取消".into(),ID_DIRECTORY_SCAN=>"扫描".into(),ID_FULL=>"全盘扫描".into(),ID_CUSTOM=>"自定义扫描".into(),ID_PROCESS=>"仅扫描进程".into(),ID_SERVICE=>"仅扫描服务".into(),ID_QUARANTINE=>"隔离区".into(),ID_REPORT=>"扫描报告".into(),ID_UPDATE=>"更新规则".into(),ID_SETTINGS=>"设置与状态".into(),_=>String::new()};result.push(item(id,name,ROLE_SYSTEM_PUSHBUTTON,rect,true));}
+    for (id,rect) in virtual_buttons(hwnd){let name=match id{ID_MINIMIZE=>"最小化".into(),ID_CLOSE=>"关闭".into(),ID_QUICK=>"开始快速扫描".into(),ID_CANCEL=>"停止扫描".into(),ID_MORE=>"功能菜单".into(),ID_DONE=>if mode==UI_MODE_REMEDIATION_DONE{"完成".into()}else{"立即处理已勾选".into()},ID_SKIP=>if mode==3&&subpage==PAGE_SETTINGS{"恢复默认".into()}else if mode==UI_MODE_REMEDIATION_DONE{"查看隔离区".into()}else{"暂不处理".into()},ID_BACK=>"返回".into(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".into(),ID_DIRECTORY_CANCEL=>"取消".into(),ID_DIRECTORY_SCAN=>"扫描".into(),ID_CUSTOM=>"自定义扫描".into(),ID_PROCESS=>"仅扫描进程".into(),ID_SERVICE=>"仅扫描服务".into(),ID_QUARANTINE=>"隔离区".into(),ID_REPORT=>"扫描报告".into(),ID_UPDATE=>"更新规则".into(),ID_SETTINGS=>"设置与状态".into(),_=>String::new()};result.push(item(id,name,ROLE_SYSTEM_PUSHBUTTON,rect,true));}
     result
 }
 
@@ -139,12 +139,11 @@ pub unsafe fn announce_settings_reset(hwnd:HWND){if !accessible_text_enabled(){r
 pub(super) fn focus_description(id:usize,mode:usize,subpage:usize)->Option<&'static str>{
     Some(match id{
         ID_QUICK=>"检查常见位置和运行中的项目；扫描进度与结果会另行播报。",
-        ID_FULL=>"检查本机磁盘上的文件，扫描时间取决于文件数量。",
         ID_CUSTOM=>"选择一个目录，只检查该目录中的项目。",
         ID_PROCESS=>"检查当前运行的进程及其关联文件。",
         ID_SERVICE=>"检查正在运行的服务及其关联文件。",
         ID_CANCEL=>"停止当前扫描，已完成的检查结果仍会保留。",
-        ID_MORE=>"展开全盘扫描、自定义扫描和其他功能。",
+        ID_MORE=>"展开自定义扫描和其他功能。",
         ID_QUARANTINE=>"查看已隔离的文件，并选择恢复或删除。",
         ID_REPORT=>"查看本次扫描记录及文件判定。",
         ID_UPDATE=>"检查可用的程序和规则更新。",
@@ -199,7 +198,7 @@ fn changed_setting_announces_value_before_explanation(){
 }
 pub unsafe fn handle_action(hwnd:HWND,id:usize,activate:bool){
     if id>=1000{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let row=id-1000;if row<list.lines.len(){list.selected=Some(row);drop(list);set_virtual_focus(hwnd,id);}return;}
-    if (ID_FINDING_FIRST..ID_FINDING_FIRST+FINDING_CONTROL_COUNT).contains(&id){if activate{let row=state().result_scroll.load(Ordering::Relaxed)+id-ID_FINDING_FIRST;if let Some(index)=alert_indices().get(row).copied(){let mut selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());if !selected.insert(index){selected.remove(&index);}drop(selected);notify_state(hwnd,id);}}set_virtual_focus(hwnd,id);return;}
+    if (ID_FINDING_FIRST..ID_FINDING_FIRST+FINDING_CONTROL_COUNT).contains(&id){if activate{let row=state().result_scroll.load(Ordering::Relaxed)/(56*dpi::window_dpi(hwnd).max(96)/96)as usize+id-ID_FINDING_FIRST;if let Some(index)=alert_indices().get(row).copied(){let mut selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());if !selected.insert(index){selected.remove(&index);}drop(selected);notify_state(hwnd,id);}}set_virtual_focus(hwnd,id);return;}
     set_virtual_focus(hwnd,id);
     if !activate{return;}
     if [ID_SETTINGS_GPU,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY].contains(&id){settings_ui::activate_focused(hwnd);return;}
