@@ -13,6 +13,7 @@ mod service_scan;
 mod quick_scan;
 mod audit;
 mod paint_cache;
+mod page_transition;
 mod updater;
 mod program_update;
 mod self_signature;
@@ -97,7 +98,7 @@ const ID_DIRECTORY_CANCEL:usize=391;
 const ID_DIRECTORY_SCAN:usize=392;
 const ID_DIRECTORY_TITLE:usize=393;
 const ID_DIRECTORY_ERROR:usize=395;
-const CLIENT_VERSION:&str="2026.10.1.1";
+const CLIENT_VERSION:&str="2026.10.3.1";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
 // The build expires at 2026-10-20 00:00 Asia/Shanghai.
 const BUILD_EXPIRY_UNIX:u64=1_792_425_600;
@@ -529,6 +530,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
         WM_TIMER if w==BUTTON_ANIMATION_TIMER => {repaint_animated_buttons(hwnd);0}
         WM_TIMER if w==PROGRESS_ANIMATION_TIMER => {animate_progress(hwnd);0}
+        WM_TIMER if w==page_transition::TIMER => {page_transition::tick(hwnd);0}
         WM_TIMER|WM_REFRESH_CLOCK => {
             let accessible=refresh_accessible_text(false);
             if LAST_ACCESSIBLE_TEXT!=Some(accessible){
@@ -601,6 +603,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             0
         }
         WM_SIZE => {
+            page_transition::clear(hwnd);
             apply_dpi_layout(hwnd, false);
             configure_custom_frame(hwnd);
             0
@@ -610,11 +613,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             DefWindowProcW(hwnd,msg,w,l)
         }
         WM_DPICHANGED => {
+            page_transition::clear(hwnd);
             let suggested = &*(l as *const RECT);
             SetWindowPos(hwnd, null_mut(), suggested.left, suggested.top, suggested.right-suggested.left, suggested.bottom-suggested.top, SWP_NOACTIVATE|SWP_NOZORDER);
             apply_dpi_layout(hwnd, true);
             configure_custom_frame(hwnd);
             0
+        }
+        WM_SETTINGCHANGE => {
+            page_transition::clear(hwnd);
+            InvalidateRect(hwnd,null(),0);
+            DefWindowProcW(hwnd,msg,w,l)
         }
         WM_GETMINMAXINFO => {
             let info=&mut *(l as *mut MINMAXINFO);
@@ -799,6 +808,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             audit::record("session","关闭窗口，取消正在运行的任务");
             KillTimer(hwnd,BUTTON_ANIMATION_TIMER);
             KillTimer(hwnd,PROGRESS_ANIMATION_TIMER);
+            page_transition::clear(hwnd);
             paint_cache::clear();
             button_tones().lock().unwrap_or_else(|error|error.into_inner()).retain(|(window,_),_|*window!=hwnd as isize);
             if state().protected.swap(false, Ordering:: SeqCst) {
@@ -897,9 +907,12 @@ unsafe fn paint_chrome(hwnd: HWND) {
     let mut client: RECT = std:: mem:: zeroed();
     GetClientRect(hwnd, &mut client);
     let memory_dc=paint_cache::surface(screen_dc,client.right,client.bottom);
+    let mode=state().ui_mode.load(Ordering::Acquire);
+    let subpage=if mode==3{state().subpage.load(Ordering::Acquire)}else{0};
+    let transitioning=memory_dc!=screen_dc&&page_transition::begin_frame(hwnd,memory_dc,&client,title_height(hwnd),(mode,subpage));
     let saved=windows_sys::Win32::Graphics::Gdi::SaveDC(memory_dc);
     let dc=if saved==0{screen_dc}else{memory_dc};
-    let dirty=ps.rcPaint;
+    let dirty=if transitioning{client}else{ps.rcPaint};
     windows_sys::Win32::Graphics::Gdi::IntersectClipRect(dc,dirty.left,dirty.top,dirty.right,dirty.bottom);
     let white = CreateSolidBrush(0x00FFFFFF);
     FillRect(dc, &client, white);
@@ -924,6 +937,7 @@ unsafe fn paint_chrome(hwnd: HWND) {
     paint_page(dc, hwnd, &client, dpi);
     paint_virtual_controls(dc,hwnd,&client,dpi);
     paint_directory_input(dc,hwnd,&client,dpi);
+    if dc!=screen_dc{page_transition::blend(hwnd,dc);}
     if saved!=0{windows_sys::Win32::Graphics::Gdi::RestoreDC(memory_dc,saved);}
     if dc!=screen_dc{BitBlt(screen_dc,dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top,dc,dirty.left,dirty.top,SRCCOPY);}
     EndPaint(hwnd, &ps);

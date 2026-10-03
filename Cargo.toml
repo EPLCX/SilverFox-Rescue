@@ -1,6 +1,6 @@
 [package]
 name = "silverfox-rescue"
-version = "2026.10.1+1"
+version = "2026.10.3+1"
 edition = "2021"
 license = "AGPL-3.0-only"
 
