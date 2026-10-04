@@ -24,7 +24,7 @@ $env:SILVERFOX_PROGRAM_PUBLIC_KEY_HEX = '<程序公钥的64位十六进制值>'
 .\build.ps1
 ```
 
-构建脚本从 `SILVERFOX_KEY_DIR`（默认 `releaseSecrets`）读取两个公钥文件并在编译前注入。更新站点默认配置为 `https://ysmj4k.bond`，可在构建前用 `SILVERFOX_CLOUD_URL` 设置。编译和临时目录从 `CARGO_TARGET_DIR` 动态取得，并要求目录位于 D 盘。
+构建脚本从 `SILVERFOX_KEY_DIR`（默认 `releaseSecrets`）读取两个公钥文件并在编译前注入。更新站点默认配置为 `https://***.sf-rescue.top`，可在构建前用 `SILVERFOX_CLOUD_URL` 设置；每个 `*` 在程序每次运行时替换为随机字母或数字，运行时环境变量不覆盖构建配置。编译和临时目录从 `CARGO_TARGET_DIR` 动态取得，并要求目录位于 D 盘。
 
 目录内存在 `program-private.pem` 时，构建后自动调用现有签名工具的 Ed25519 签名与验签函数，输出 `dist/silverfox-rescue.exe` 和带版本号的 EXE。`SILVERFOX_DIST_DIR` 可统一调整构建与签名工具的发布目录。未签名的编译产物保存在 `<CARGO_TARGET_DIR>`。交互菜单继续用于单独签名、打包及清单验签。
 

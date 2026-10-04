@@ -62,8 +62,9 @@ pub fn download_url(base_url:&str,url:&str)->String{
 impl CloudClient{
     pub fn configured()->Self{
         let base_url=RUN_UPDATE_URL.get_or_init(||{
-            let configured=std::env::var("SILVERFOX_CLOUD_URL").unwrap_or_else(|_|option_env!("SILVERFOX_CLOUD_URL").unwrap_or(DEFAULT_UPDATE_URL).to_owned()).trim().trim_end_matches('/').to_owned();
-            expand_update_url(&configured)
+            // The build selects the template; inherited workstation variables must
+            // not override the address embedded in a distributed executable.
+            expand_update_url(option_env!("SILVERFOX_CLOUD_URL").unwrap_or(DEFAULT_UPDATE_URL))
         }).clone();
         Self{base_url}
     }
@@ -137,6 +138,25 @@ mod network_diagnostics {
     #[test]fn random_choices_cover_the_alphabet_and_clients_share_one_run_url(){
         let random=SystemRandom::new();for _ in 0..64{assert!(RANDOM_ALPHABET.contains(&(random_character(&random)as u8)));}
         assert_eq!(CloudClient::configured().base_url,CloudClient::configured().base_url);
+    }
+    #[test]fn inherited_environment_does_not_override_the_built_template(){
+        const CHILD:&str="SILVERFOX_TEST_INHERITED_UPDATE_URL";
+        if std::env::var_os(CHILD).is_some(){
+            assert_eq!(std::env::var("SILVERFOX_CLOUD_URL").unwrap(),"https://obsolete.example.invalid");
+            let template=option_env!("SILVERFOX_CLOUD_URL").unwrap_or(DEFAULT_UPDATE_URL).trim().trim_end_matches('/');
+            let template=if template.contains("://"){template.to_owned()}else{format!("https://{template}")};
+            let actual=CloudClient::configured().base_url;
+            assert_eq!(actual.len(),template.len());
+            for (expected,actual) in template.chars().zip(actual.chars()){
+                if expected=='*'{assert!(actual.is_ascii_alphanumeric());}else{assert_eq!(actual,expected);}
+            }
+            return;
+        }
+        let status=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","cloud::domain_tests::inherited_environment_does_not_override_the_built_template"])
+            .env(CHILD,"1").env("SILVERFOX_CLOUD_URL","https://obsolete.example.invalid")
+            .status().unwrap();
+        assert!(status.success());
     }
     #[test]fn downloads_use_the_runtime_host_and_keep_the_path_and_query(){
         let base="https://Ab9.sf-rescue.top";
