@@ -32,8 +32,9 @@ fn verify_embedded_engine_section(engine:&[u8],version:&str,key:&[u8]){
 }
 fn main(){
     for name in ["SILVERFOX_RULE_PUBLIC_KEY_HEX","SILVERFOX_PROGRAM_PUBLIC_KEY_HEX","SILVERFOX_BENCHMARK_BUILD","SILVERFOX_CLOUD_URL"]{println!("cargo:rerun-if-env-changed={name}");}
-    let cloud_url=env::var("SILVERFOX_CLOUD_URL").unwrap_or_else(|_|"https://ysmj4k.bond".into());
+    let cloud_url=env::var("SILVERFOX_CLOUD_URL").unwrap_or_else(|_|"https://***.sf-rescue.top".into());
     let cloud_url=cloud_url.trim().trim_end_matches('/');
+    let cloud_url=if cloud_url.contains("://"){cloud_url.to_owned()}else{format!("https://{cloud_url}")};
     assert!(cloud_url.starts_with("https://")&&!cloud_url.contains(['\r','\n']),"update site must use HTTPS");
     println!("cargo:rustc-env=SILVERFOX_CLOUD_URL={cloud_url}");
     println!("cargo:rerun-if-changed=engine/algorithms.dll");println!("cargo:rerun-if-changed=rules/seed/rules.manifest.json");

@@ -138,7 +138,7 @@ fn engine_identity_message(product:&str,version:&str,platform:&str,abi:u32,body_
 /// not use the Windows certificate store or Authenticode trust chain.
 pub fn verify_engine_bytes(bytes:&[u8],expected_version:&str)->Result<()> {
     if crate::self_signature::signature_offset(bytes)?.is_some(){
-        let key=hex::decode(RULE_PUBLIC_KEY_HEX).context("生产规则公钥无效")?;
+        let key=hex::decode(RULE_PUBLIC_KEY_HEX.trim()).context("生产规则公钥无效")?;
         if key.len()!=32{anyhow::bail!("未配置有效的生产规则公钥");}
         let mut domain=crate::self_signature::ENGINE_DOMAIN.to_vec();
         domain.extend_from_slice(expected_version.as_bytes());domain.push(0);
@@ -166,7 +166,7 @@ pub fn verify_engine_bytes(bytes:&[u8],expected_version:&str)->Result<()> {
     if product!=ENGINE_PRODUCT||version!=expected_version||platform!=ENGINE_PLATFORM{anyhow::bail!("算法 DLL 不属于本项目、版本或平台");}
     if Sha256::digest(&bytes[..start]).as_slice()!=digest{anyhow::bail!("算法 DLL 主体已被篡改");}
     let signed=engine_identity_message(product,version,platform,abi,body_len,digest);
-    let key=hex::decode(RULE_PUBLIC_KEY_HEX).context("生产规则公钥无效")?;
+    let key=hex::decode(RULE_PUBLIC_KEY_HEX.trim()).context("生产规则公钥无效")?;
     if key.len()!=32{anyhow::bail!("未配置有效的生产规则公钥");}
     UnparsedPublicKey::new(&ED25519,key).verify(&signed,signature).map_err(|_|anyhow::anyhow!("算法 DLL 项目身份签名验证失败"))
 }
@@ -176,7 +176,7 @@ pub fn verify_rule_package_bytes(bytes:&[u8], expected:&str, signature_b64:&str,
     let digest=Sha256::digest(bytes);
     if hex::encode(digest)!=expected.to_ascii_lowercase(){anyhow::bail!("规则包哈希不匹配");}
     let sig=STANDARD.decode(signature_b64).context("规则包签名编码无效")?;
-    let key=hex::decode(RULE_PUBLIC_KEY_HEX).context("生产规则公钥无效")?;
+    let key=hex::decode(RULE_PUBLIC_KEY_HEX.trim()).context("生产规则公钥无效")?;
     if key.len()!=32 { anyhow::bail!("未配置有效的生产规则公钥"); }
     UnparsedPublicKey::new(&ED25519,key).verify(&digest,&sig).map_err(|_|anyhow::anyhow!("规则包签名验证失败"))?;
     Ok(())
@@ -235,6 +235,7 @@ pub fn update(base_url:&str)->Result<String>{
         if !version_is_newer(&manifest.version,&current.version)? {return Ok(format!("已使用规则版本 {}，云端没有更新版本",current.version));}
     }
     let url=manifest.url.clone().context("清单缺少下载地址")?;
+    let url=crate::cloud::download_url(base_url,&url);
     if !url.starts_with("https://") && !base_url.starts_with("http://127.0.0.1") { anyhow::bail!("规则下载必须使用 HTTPS"); }
     let reader=crate::cloud::https_agent()?.get(&url).call().context("规则下载失败")?.into_reader();let mut bytes=Vec::new();reader.take(8*1024*1024).read_to_end(&mut bytes)?;
     install_verified_package(&bytes,&manifest)?;

@@ -98,10 +98,8 @@ const ID_DIRECTORY_CANCEL:usize=391;
 const ID_DIRECTORY_SCAN:usize=392;
 const ID_DIRECTORY_TITLE:usize=393;
 const ID_DIRECTORY_ERROR:usize=395;
-const CLIENT_VERSION:&str="2026.10.3.1";
+const CLIENT_VERSION:&str="2026.10.3.2";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
-// The build expires at 2026-10-20 00:00 Asia/Shanghai.
-const BUILD_EXPIRY_UNIX:u64=1_792_425_600;
 // The only terminal page in the scan/remediation flow. It is entered by the
 // remediation worker after all selected items have been processed, never by a
 // scan completion callback.
@@ -170,7 +168,7 @@ impl EtaEstimator{
 }
 struct PreparedProgramUpdate { version:String, package:PathBuf, manifest:PathBuf, ready:PathBuf, executable:PathBuf, backup:PathBuf }
 struct AppState {
-    scan_cancel: AtomicBool, shutdown: AtomicBool, working: AtomicBool, protected: AtomicBool, allow_close: AtomicBool, remediation_complete: AtomicBool, progress_mode: AtomicUsize, progress_profile: AtomicUsize, progress_stage: AtomicUsize, progress_done: AtomicUsize, progress_total: AtomicUsize, scan_started_ms: AtomicUsize, eta:Mutex<EtaEstimator>, ui_mode: AtomicUsize, subpage: AtomicUsize, page_generation:AtomicUsize, threat_count: AtomicUsize, cleaned_count: AtomicUsize, remediation_total:AtomicUsize, remediation_failed:AtomicUsize, remediation_pending:AtomicUsize, current_path: Mutex<String>, operation: Mutex<String>, page_action: Mutex<String>, program_update_policy:Mutex<String>, program_update_version:Mutex<String>, program_update_status:Mutex<String>, prepared_program_update:Mutex<Option<PreparedProgramUpdate>>, program_update_log:Mutex<VecDeque<String>>, activity: Mutex<VecDeque<String>>, page_queue: Mutex<VecDeque<(usize,usize,String)>>, quarantine_records:Mutex<Vec<quarantine::QuarantineRecord>>, findings: Mutex<Vec<Finding>>, selected_findings:Mutex<HashSet<usize>>, result_scroll:AtomicUsize
+    scan_cancel: AtomicBool, shutdown: AtomicBool, working: AtomicBool, protected: AtomicBool, allow_close: AtomicBool, remediation_complete: AtomicBool, progress_mode: AtomicUsize, progress_profile: AtomicUsize, progress_stage: AtomicUsize, progress_done: AtomicUsize, progress_total: AtomicUsize, scan_started_ms: AtomicUsize, eta:Mutex<EtaEstimator>, ui_mode: AtomicUsize, subpage: AtomicUsize, page_generation:AtomicUsize, threat_count: AtomicUsize, cleaned_count: AtomicUsize, remediation_total:AtomicUsize, remediation_failed:AtomicUsize, remediation_pending:AtomicUsize, current_path: Mutex<String>, operation: Mutex<String>, page_action: Mutex<String>, program_update_policy:Mutex<String>, program_update_version:Mutex<String>, program_update_status:Mutex<String>, prepared_program_update:Mutex<Option<PreparedProgramUpdate>>, program_update_log:Mutex<VecDeque<String>>, activity: Mutex<VecDeque<String>>, page_queue: Mutex<VecDeque<(usize,usize,String)>>, quarantine_records:Mutex<Vec<quarantine::QuarantineRecord>>, findings: Mutex<Vec<Finding>>, result_indices:Mutex<Arc<[usize]>>, selected_findings:Mutex<HashSet<usize>>, result_scroll:AtomicUsize
 }
 static STATE: OnceLock<Arc<AppState>>= OnceLock:: new();
 static FORCED_UPDATE: AtomicBool = AtomicBool::new(false);
@@ -263,25 +261,34 @@ unsafe fn repaint_animated_buttons(hwnd:HWND){
 const RESULT_SCROLL_TIMER:usize=0x5F31;
 static RESULT_SCROLL:OnceLock<Mutex<result_scroll::ResultScroll>>=OnceLock::new();
 fn result_scroll_state()->&'static Mutex<result_scroll::ResultScroll>{RESULT_SCROLL.get_or_init(||Mutex::new(result_scroll::ResultScroll::default()))}
+unsafe fn result_list_rect(hwnd:HWND)->RECT{
+    let dpi=dpi::window_dpi(hwnd).max(96)as i32;let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
+    RECT{left:30*dpi/96,top:120*dpi/96,right:client.right-30*dpi/96,bottom:client.bottom-130*dpi/96}
+}
 unsafe fn result_scroll_max(hwnd:HWND)->f64{
-    let dpi=dpi::window_dpi(hwnd).max(96)as i32;
-    let viewport=(client_height(hwnd)-250*dpi/96).max(0);
-    (alert_indices().len()as i32*(56*dpi/96)-viewport).max(0)as f64
+    let dpi=dpi::window_dpi(hwnd).max(96)as i32;let area=result_list_rect(hwnd);
+    (state().threat_count.load(Ordering::Relaxed)as i32*(56*dpi/96)-(area.bottom-area.top).max(0)).max(0)as f64
+}
+unsafe fn publish_result_scroll(hwnd:HWND,scroll:&result_scroll::ResultScroll){
+    let pixel=scroll.position.round()as usize;
+    if state().result_scroll.swap(pixel,Ordering::Relaxed)!=pixel{InvalidateRect(hwnd,&result_list_rect(hwnd),0);}
 }
 unsafe fn scroll_results(hwnd:HWND,delta:f64,animate:bool){
     let mut scroll=result_scroll_state().lock().unwrap_or_else(|e|e.into_inner());
-    scroll.move_by(delta,result_scroll_max(hwnd),animate);
-    state().result_scroll.store(scroll.position.round()as usize,Ordering::Relaxed);
-    if animate{SetTimer(hwnd,RESULT_SCROLL_TIMER,16,None);}else{KillTimer(hwnd,RESULT_SCROLL_TIMER);}
-    InvalidateRect(hwnd,null(),0);
+    let running=scroll.animating();scroll.move_by(delta,result_scroll_max(hwnd),animate,Instant::now());
+    publish_result_scroll(hwnd,&scroll);
+    if scroll.animating(){if !running{SetTimer(hwnd,RESULT_SCROLL_TIMER,10,None);}}
+    else{KillTimer(hwnd,RESULT_SCROLL_TIMER);}
 }
 unsafe fn animate_result_scroll(hwnd:HWND){
     let mut scroll=result_scroll_state().lock().unwrap_or_else(|e|e.into_inner());
-    if state().ui_mode.load(Ordering::Acquire)!=2{KillTimer(hwnd,RESULT_SCROLL_TIMER);return;}
-    if !scroll.tick(result_scroll_max(hwnd)){KillTimer(hwnd,RESULT_SCROLL_TIMER);}
-    state().result_scroll.store(scroll.position.round()as usize,Ordering::Relaxed);
-    InvalidateRect(hwnd,null(),0);
+    if state().ui_mode.load(Ordering::Acquire)!=2{scroll.stop();KillTimer(hwnd,RESULT_SCROLL_TIMER);return;}
+    if !scroll.tick(result_scroll_max(hwnd),Instant::now()){KillTimer(hwnd,RESULT_SCROLL_TIMER);}
+    publish_result_scroll(hwnd,&scroll);
 }
+const MENU_ROW_HEIGHT:i32=34;
+const MENU_PADDING:i32=4;
+const MENU_GAP:i32=4;
 const MENU_IDS:[usize;7]=[ID_CUSTOM,ID_PROCESS,ID_SERVICE,ID_QUARANTINE,ID_REPORT,ID_UPDATE,ID_SETTINGS];
 static mut LAST_UI_MODE: usize = usize:: MAX;
 static mut LAST_UI_SUBPAGE: usize = usize::MAX;
@@ -418,6 +425,7 @@ fn schedule_update_cleanup(paths:Vec<PathBuf>){
 
 // Static labels are drawn directly into the current paint DC.
 unsafe fn draw_static_text_image(dc:HDC,rect:&RECT,text:&[u16],font:HFONT,color:u32,background:u32,format:u32){
+    if windows_sys::Win32::Graphics::Gdi::RectVisible(dc,rect)==0{return;}
     let brush=CreateSolidBrush(background);FillRect(dc,rect,brush);DeleteObject(brush);
     let old_font=if !font.is_null(){SelectObject(dc,font)}else{std::ptr::null_mut()};
     SetBkMode(dc,TRANSPARENT as i32);SetTextColor(dc,color);let mut draw_rect=*rect;
@@ -477,7 +485,7 @@ fn refresh_accessible_text(force:bool)->bool{
 fn state() -> &'static Arc<AppState> {
     STATE.get().expect("state initialized")
 }
-fn new_app_state()->Arc<AppState>{Arc:: new(AppState{scan_cancel: AtomicBool:: new(false), shutdown: AtomicBool:: new(false), working: AtomicBool:: new(false), protected: AtomicBool:: new(false), allow_close: AtomicBool:: new(false), remediation_complete: AtomicBool::new(false), progress_mode: AtomicUsize:: new(0), progress_profile:AtomicUsize::new(0), progress_stage: AtomicUsize::new(0), progress_done: AtomicUsize:: new(0), progress_total: AtomicUsize:: new(0), scan_started_ms: AtomicUsize::new(0), eta:Mutex::new(EtaEstimator::default()), ui_mode: AtomicUsize:: new(0), subpage: AtomicUsize:: new(0), page_generation:AtomicUsize::new(0), threat_count: AtomicUsize:: new(0), cleaned_count: AtomicUsize:: new(0), remediation_total:AtomicUsize::new(0), remediation_failed:AtomicUsize::new(0), remediation_pending:AtomicUsize::new(0), current_path: Mutex::new(String::new()), operation:Mutex::new(String::new()), page_action:Mutex::new("执行".into()), program_update_policy:Mutex::new(String::new()), program_update_version:Mutex::new(String::new()), program_update_status:Mutex::new("正在查询服务端更新策略".into()), prepared_program_update:Mutex::new(None), program_update_log:Mutex::new(VecDeque::new()), activity:Mutex::new(VecDeque::new()), page_queue:Mutex::new(VecDeque::new()), quarantine_records:Mutex::new(Vec::new()), findings: Mutex:: new(Vec:: new()),selected_findings:Mutex::new(HashSet::new()),result_scroll:AtomicUsize::new(0)})}
+fn new_app_state()->Arc<AppState>{Arc:: new(AppState{scan_cancel: AtomicBool:: new(false), shutdown: AtomicBool:: new(false), working: AtomicBool:: new(false), protected: AtomicBool:: new(false), allow_close: AtomicBool:: new(false), remediation_complete: AtomicBool::new(false), progress_mode: AtomicUsize:: new(0), progress_profile:AtomicUsize::new(0), progress_stage: AtomicUsize::new(0), progress_done: AtomicUsize:: new(0), progress_total: AtomicUsize:: new(0), scan_started_ms: AtomicUsize::new(0), eta:Mutex::new(EtaEstimator::default()), ui_mode: AtomicUsize:: new(0), subpage: AtomicUsize:: new(0), page_generation:AtomicUsize::new(0), threat_count: AtomicUsize:: new(0), cleaned_count: AtomicUsize:: new(0), remediation_total:AtomicUsize::new(0), remediation_failed:AtomicUsize::new(0), remediation_pending:AtomicUsize::new(0), current_path: Mutex::new(String::new()), operation:Mutex::new(String::new()), page_action:Mutex::new("执行".into()), program_update_policy:Mutex::new(String::new()), program_update_version:Mutex::new(String::new()), program_update_status:Mutex::new("正在查询服务端更新策略".into()), prepared_program_update:Mutex::new(None), program_update_log:Mutex::new(VecDeque::new()), activity:Mutex::new(VecDeque::new()), page_queue:Mutex::new(VecDeque::new()), quarantine_records:Mutex::new(Vec::new()), findings: Mutex:: new(Vec:: new()),result_indices:Mutex::new(Arc::from(Vec::<usize>::new())),selected_findings:Mutex::new(HashSet::new()),result_scroll:AtomicUsize::new(0)})}
 
 fn queue(message: impl Into<String>) {
     let message=message.into();
@@ -525,7 +533,12 @@ fn queue_page_for(hwnd:HWND,page:usize,generation:usize,message:impl Into<String
     state().page_queue.lock().unwrap_or_else(|error|error.into_inner()).push_back((page,generation,message));
     unsafe { PostMessageW(hwnd,WM_PAGE_QUEUE_READY,0,0); }
 }
-fn alert_indices()->Vec<usize>{state().findings.lock().unwrap_or_else(|error|error.into_inner()).iter().enumerate().filter_map(|(index,finding)|matches!(finding.verdict,Verdict::Malicious|Verdict::Suspicious).then_some(index)).collect()}
+fn alert_indices()->Arc<[usize]>{Arc::clone(&state().result_indices.lock().unwrap_or_else(|error|error.into_inner()))}
+fn publish_findings(app:&AppState,findings:Vec<Finding>){
+    let indices:Vec<usize>=findings.iter().enumerate().filter_map(|(index,finding)|matches!(finding.verdict,Verdict::Malicious|Verdict::Suspicious).then_some(index)).collect();
+    *app.findings.lock().unwrap_or_else(|error|error.into_inner())=findings;
+    *app.result_indices.lock().unwrap_or_else(|error|error.into_inner())=Arc::from(indices);
+}
 fn requires_manual_selection(source:&str)->bool{source.starts_with("service-host-advisory:")}
 fn default_selected_indices()->HashSet<usize>{state().findings.lock().unwrap_or_else(|error|error.into_inner()).iter().enumerate().filter_map(|(index,finding)|(finding.verdict==Verdict::Malicious&&!requires_manual_selection(&finding.source)).then_some(index)).collect()}
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -572,7 +585,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 let mut scroll=result_scroll_state().lock().unwrap_or_else(|e|e.into_inner());
                 if info.dwFlags&GF_BEGIN!=0{
                     scroll.pan=if point.y>=120*dpi/96&&point.y<client_height(hwnd)-130*dpi/96{Some(point.y)}else{None};
-                    scroll.target=scroll.position;
+                    scroll.stop();KillTimer(hwnd,RESULT_SCROLL_TIMER);
                 }else if let Some(previous)=scroll.pan{
                     scroll.dragged|=previous!=point.y;scroll.pan=Some(point.y);drop(scroll);scroll_results(hwnd,(previous-point.y)as f64,false);
                     scroll=result_scroll_state().lock().unwrap_or_else(|e|e.into_inner());
@@ -783,11 +796,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             0
         }
-        WM_MOUSEWHEEL => {let delta=((w>>16)&0xffff)as i16;if state().ui_mode.load(Ordering::Acquire)==2 {scroll_results(hwnd,-delta as f64/120.0*(112*dpi::window_dpi(hwnd).max(96)/96)as f64,true);}else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let max=list.lines.len().saturating_sub(1);list.scroll=if delta<0{(list.scroll+1).min(max)}else{list.scroll.saturating_sub(1)};InvalidateRect(hwnd,null(),0);}0 }
+        WM_MOUSEWHEEL => {let delta=((w>>16)&0xffff)as i16;if state().ui_mode.load(Ordering::Acquire)==2 {scroll_results(hwnd,-delta as f64/120.0*(112*dpi::window_dpi(hwnd).max(96)/96)as f64,delta.unsigned_abs()>=120);}else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let max=list.lines.len().saturating_sub(1);list.scroll=if delta<0{(list.scroll+1).min(max)}else{list.scroll.saturating_sub(1)};InvalidateRect(hwnd,null(),0);}0 }
         WM_KEYDOWN => {
             if w==VK_TAB as usize{if accessible_text_enabled(){move_virtual_focus(hwnd,GetKeyState(VK_SHIFT as i32)<0);}return 0;}
             if VIRTUAL_MENU_OPEN&&w==VK_ESCAPE as usize{VIRTUAL_MENU_OPEN=false;VIRTUAL_FOCUS=ID_MORE;InvalidateRect(hwnd,null(),0);return 0;}
-            if VIRTUAL_MENU_OPEN&&(w==VK_UP as usize||w==VK_DOWN as usize){let current=MENU_IDS.iter().position(|id|*id==VIRTUAL_FOCUS).unwrap_or(0);let next=if w==VK_UP as usize{(current+MENU_IDS.len()-1)%MENU_IDS.len()}else{(current+1)%MENU_IDS.len()};set_virtual_focus(hwnd,MENU_IDS[next]);return 0;}
+            if VIRTUAL_MENU_OPEN&&(w==VK_UP as usize||w==VK_DOWN as usize){let current=MENU_IDS.iter().position(|id|*id==VIRTUAL_FOCUS);let next=match current{Some(current)if w==VK_UP as usize=>(current+MENU_IDS.len()-1)%MENU_IDS.len(),Some(current)=>(current+1)%MENU_IDS.len(),None if w==VK_UP as usize=>MENU_IDS.len()-1,None=>0};set_virtual_focus(hwnd,MENU_IDS[next]);return 0;}
             if directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
                 if w==VK_ESCAPE as usize{set_directory_input_active(hwnd,false);}
                 else if w==VK_RETURN as usize{if VIRTUAL_FOCUS==ID_DIRECTORY_CANCEL{set_directory_input_active(hwnd,false);}else if VIRTUAL_FOCUS==ID_MINIMIZE||VIRTUAL_FOCUS==ID_CLOSE{activate_virtual_button(hwnd,VIRTUAL_FOCUS);}else{submit_directory_input(hwnd);}}
@@ -1385,7 +1398,7 @@ unsafe fn virtual_buttons(hwnd:HWND)->Vec<(usize,RECT)>{
     }
     if VIRTUAL_MENU_OPEN{
         let(left,top,menu_width)=menu_layout(hwnd,&client,dpi);
-        for (index,id) in MENU_IDS.iter().enumerate(){buttons.push((*id,RECT{left,top:top+index as i32*s(34),right:left+menu_width,bottom:top+(index as i32+1)*s(34)}));}
+        for (index,id) in MENU_IDS.iter().enumerate(){buttons.push((*id,RECT{left,top:top+index as i32*s(MENU_ROW_HEIGHT),right:left+menu_width,bottom:top+(index as i32+1)*s(MENU_ROW_HEIGHT)}));}
     }
     buttons
 }
@@ -1397,7 +1410,8 @@ unsafe fn menu_layout(hwnd:HWND,client:&RECT,dpi:i32)->(i32,i32,i32){
     let left=client.right-s(if home{184}else{232});
     // Keep the popup attached to its trigger on every page. Its rows overlay
     // nearby page actions while open, as a normal transient menu does.
-    let top=(client.bottom-s(323)).max(title_height(hwnd)+s(8));
+    let trigger_top=client.bottom-s(43);
+    let top=(trigger_top-s(MENU_GAP)-s(MENU_PADDING)-MENU_IDS.len()as i32*s(MENU_ROW_HEIGHT)).max(title_height(hwnd)+s(8));
     (left,top,width)
 }
 
@@ -1478,11 +1492,11 @@ unsafe fn paint_virtual_controls(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
     }
     if VIRTUAL_MENU_OPEN{
         let s=|v:i32|v*dpi/96;let(left,top,menu_width)=menu_layout(hwnd,client,dpi);
-        let panel=RECT{left:left-s(4),top:top-s(4),right:left+menu_width+s(4),bottom:top+s(242)};
+        let panel=RECT{left:left-s(4),top:top-s(4),right:left+menu_width+s(4),bottom:top+MENU_IDS.len()as i32*s(MENU_ROW_HEIGHT)+s(MENU_PADDING)};
         if ui_rounding::enabled(){ui_rounding::control(dc,panel,0x00FFFFFF,Some(0x00D9E2F0),0x00FFFFFF,s(5).max(1));}
         else{let brush=CreateSolidBrush(0x00FFFFFF);FillRect(dc,&panel,brush);DeleteObject(brush);let pen=CreatePen(PS_SOLID,1,0x00D9E2F0);let old=SelectObject(dc,pen);let empty=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,panel.left,panel.top,panel.right,panel.bottom);SelectObject(dc,empty);SelectObject(dc,old);DeleteObject(pen);}
         let labels=["自定义扫描…","仅扫描进程","仅扫描服务","隔离区","扫描报告","更新规则","设置与状态"];
-        for (index,id) in MENU_IDS.iter().enumerate(){let row=RECT{left,top:top+index as i32*s(34),right:left+menu_width,bottom:top+(index as i32+1)*s(34)};let target=if VIRTUAL_FOCUS==*id||VIRTUAL_HOT==*id{0x00F3E7DE}else{0x00FFFFFF};let color=animated_button_color(hwnd,*id,target);if color!=0x00FFFFFF{if ui_rounding::enabled(){ui_rounding::control(dc,row,color,None,0x00FFFFFF,s(4).max(1));}else{let hot=CreateSolidBrush(color);FillRect(dc,&row,hot);DeleteObject(hot);}}SetTextColor(dc,0x00445566);let mut text=row;text.left+=s(12);DrawTextW(dc,wide(labels[index]).as_ptr(),-1,&mut text,DT_VCENTER|DT_SINGLELINE);}
+        for (index,id) in MENU_IDS.iter().enumerate(){let row=RECT{left,top:top+index as i32*s(MENU_ROW_HEIGHT),right:left+menu_width,bottom:top+(index as i32+1)*s(MENU_ROW_HEIGHT)};let target=if VIRTUAL_FOCUS==*id||VIRTUAL_HOT==*id{0x00F3E7DE}else{0x00FFFFFF};let color=animated_button_color(hwnd,*id,target);if color!=0x00FFFFFF{if ui_rounding::enabled(){ui_rounding::control(dc,row,color,None,0x00FFFFFF,s(4).max(1));}else{let hot=CreateSolidBrush(color);FillRect(dc,&row,hot);DeleteObject(hot);}}SetTextColor(dc,0x00445566);let mut text=row;text.left+=s(12);DrawTextW(dc,wide(labels[index]).as_ptr(),-1,&mut text,DT_VCENTER|DT_SINGLELINE);}
     }
 }
 
@@ -1619,12 +1633,43 @@ fn menu_keeps_its_trigger_button_visible(){unsafe{
     for id in [ID_PAGE_ACTION,ID_BACK,ID_MORE]{assert!(buttons.iter().any(|(button,_)|*button==id),"subpage button {id} vanished under the menu");}
     let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
     let(left,top,width)=menu_layout(hwnd,&client,96);
-    let panel=RECT{left:left-4,top:top-4,right:left+width+4,bottom:top+276};
+    let panel=RECT{left:left-4,top:top-4,right:left+width+4,bottom:top+MENU_IDS.len()as i32*MENU_ROW_HEIGHT+MENU_PADDING};
     let trigger=buttons.iter().find(|(button,_)|*button==ID_MORE).unwrap().1;
     assert_eq!(trigger.top-panel.bottom,4,"the popup is detached from its trigger");
     assert_eq!(virtual_button_at(hwnd,left+width/2,top+17),ID_CUSTOM,"popup rows must take precedence over page buttons");
+    for dpi in [96,120,144]{
+        let scale=|v:i32|v*dpi/96;let client=RECT{left:0,top:0,right:scale(600),bottom:scale(450)};
+        for mode in [0,3]{
+            state().ui_mode.store(mode,Ordering::Release);let(_,top,_)=menu_layout(hwnd,&client,dpi);
+            let panel_bottom=top+MENU_IDS.len()as i32*scale(MENU_ROW_HEIGHT)+scale(MENU_PADDING);
+            assert_eq!(client.bottom-scale(43)-panel_bottom,scale(MENU_GAP));
+        }
+    }
+
     VIRTUAL_MENU_OPEN=false;
     DestroyWindow(hwnd);
+}}
+
+#[cfg(test)]
+#[test]
+fn result_scroll_reuses_indices_and_repaints_only_the_list(){unsafe{
+    STATE.get_or_init(new_app_state);
+    let app=state();let previous_mode=app.ui_mode.swap(2,Ordering::Release);let previous_threats=app.threat_count.swap(20,Ordering::Relaxed);
+    let previous_findings=std::mem::take(&mut *app.findings.lock().unwrap());
+    let previous_scroll=app.result_scroll.swap(0,Ordering::Relaxed);
+    let previous_animation=std::mem::take(&mut *result_scroll_state().lock().unwrap());
+    publish_findings(app,(0..20).map(|index|Finding{path:format!("sample-{index}.exe").into(),sha256:None,verdict:Verdict::Malicious,score:100,evidence:vec![],source:"test".into()}).collect());
+    assert!(Arc::ptr_eq(&alert_indices(),&alert_indices()),"scrolling must reuse the published index");
+    let instance=GetModuleHandleW(null());let class=wide("SilverFoxResultScrollDirtyTest");
+    let wc=WNDCLASSW{lpfnWndProc:Some(DefWindowProcW),hInstance:instance,lpszClassName:class.as_ptr(),..std::mem::zeroed()};RegisterClassW(&wc);
+    let hwnd=CreateWindowExW(0,class.as_ptr(),wide("").as_ptr(),WS_POPUP|WS_VISIBLE,-10000,-10000,735,558,null_mut(),null_mut(),instance,null());assert!(!hwnd.is_null());
+    windows_sys::Win32::Graphics::Gdi::ValidateRect(hwnd,null());
+    scroll_results(hwnd,4.0,false);
+    let mut dirty:RECT=std::mem::zeroed();assert_ne!(windows_sys::Win32::Graphics::Gdi::GetUpdateRect(hwnd,&mut dirty,0),0);
+    let area=result_list_rect(hwnd);assert_eq!((dirty.left,dirty.top,dirty.right,dirty.bottom),(area.left,area.top,area.right,area.bottom));
+    windows_sys::Win32::Graphics::Gdi::ValidateRect(hwnd,null());scroll_results(hwnd,0.0,false);
+    assert_eq!(windows_sys::Win32::Graphics::Gdi::GetUpdateRect(hwnd,&mut dirty,0),0,"unchanged pixels must not repaint");
+    DestroyWindow(hwnd);publish_findings(app,previous_findings);app.ui_mode.store(previous_mode,Ordering::Release);app.threat_count.store(previous_threats,Ordering::Relaxed);app.result_scroll.store(previous_scroll,Ordering::Relaxed);*result_scroll_state().lock().unwrap()=previous_animation;
 }}
 
 #[cfg(test)]
@@ -1664,8 +1709,8 @@ fn painted_page_snapshots(){unsafe{
     let font=CreateFontW(-12,0,0,0,FW_NORMAL as i32,0,0,0,DEFAULT_CHARSET as u32,0,0,0,0,wide("Microsoft YaHei").as_ptr());UI_FONT=font;
     for (style,rounding) in [("native",false),("win11",true)]{
     ui_rounding::simulate_windows_11(rounding);
-    for (name,mode,subpage) in [("home",0,0),("scan",1,0),("results",2,0),("cancel",UI_MODE_REMEDIATION_DONE,0),("settings",3,PAGE_SETTINGS),("report",3,PAGE_REPORT),("report-menu",3,PAGE_REPORT)]{
-        VIRTUAL_MENU_OPEN=name=="report-menu";
+    for (name,mode,subpage) in [("home",0,0),("home-menu",0,0),("scan",1,0),("results",2,0),("cancel",UI_MODE_REMEDIATION_DONE,0),("settings",3,PAGE_SETTINGS),("report",3,PAGE_REPORT),("report-menu",3,PAGE_REPORT)]{
+        VIRTUAL_MENU_OPEN=name.ends_with("-menu");
         state().ui_mode.store(mode,Ordering::Release);state().subpage.store(subpage,Ordering::Release);
         *state().operation.lock().unwrap_or_else(|error|error.into_inner())=match name{"scan"=>"正在快速扫描…","cancel"=>"扫描已取消",_=>""}.into();
         *state().current_path.lock().unwrap_or_else(|error|error.into_inner())=r"C:\Users\Administrator\Downloads\sample.exe".into();
@@ -1764,7 +1809,7 @@ unsafe fn announce_scan_result(hwnd:HWND){
 
 unsafe fn show_more_menu(hwnd: HWND) {
     VIRTUAL_MENU_OPEN=true;
-    set_virtual_focus(hwnd,ID_CUSTOM);
+    set_virtual_focus(hwnd,ID_MORE);
     InvalidateRect(hwnd,null(),0);
 }
 unsafe fn drain_page_queue(hwnd:HWND) {
@@ -2011,7 +2056,7 @@ unsafe fn start_scan(paths: Vec<ScanTarget>, include_processes: bool, progress_p
         if incomplete>0{queue(format!("部分项目未覆盖：{}\r\n",incomplete));}
         let cancelled = app.scan_cancel.load(Ordering::Relaxed);
         app.cleaned_count.store(0,Ordering::Relaxed);
-        *app.findings.lock().unwrap_or_else(|error|error.into_inner())=results;
+        publish_findings(&app,results);
         *app.selected_findings.lock().unwrap_or_else(|error|error.into_inner())=default_selected_indices();
         wait_for_scan_presentation(&app.scan_cancel);
         let cancelled=cancelled||app.scan_cancel.load(Ordering::Acquire);
@@ -2049,7 +2094,7 @@ unsafe fn start_process_scan() {
                 app.threat_count.store(threats,Ordering::Relaxed);
                 let cancelled=app.scan_cancel.load(Ordering::Relaxed);
                 app.cleaned_count.store(0,Ordering::Relaxed);
-                *app.findings.lock().unwrap_or_else(|error|error.into_inner())=findings;
+                publish_findings(&app,findings);
                 *app.selected_findings.lock().unwrap_or_else(|error|error.into_inner())=default_selected_indices();
                 progress_finish(cancelled);
                 queue(if cancelled{"扫描已取消。\r\n".to_string()}else{format!("进程扫描完成：发现 {} 个威胁。\r\n",threats)});
@@ -2089,7 +2134,7 @@ unsafe fn start_service_scan() {
     std::thread::spawn(move||{
         let scanner=match Scanner::load(){Ok(scanner)=>scanner,Err(error)=>{queue(format!("服务扫描失败：规则加载失败：{}",error));app.working.store(false,Ordering::SeqCst);app.ui_mode.store(2,Ordering::Release);return;}};
         match scan_service_images_ml(&scanner,&app){
-            Ok(findings)=>{let threats=findings.iter().filter(|finding|matches!(finding.verdict,Verdict::Malicious|Verdict::Suspicious)).count();app.threat_count.store(threats,Ordering::Relaxed);*app.findings.lock().unwrap_or_else(|error|error.into_inner())=findings;*app.selected_findings.lock().unwrap_or_else(|error|error.into_inner())=default_selected_indices();progress_finish(app.scan_cancel.load(Ordering::Relaxed));queue(format!("服务扫描完成：发现 {} 个威胁。",threats));}
+            Ok(findings)=>{let threats=findings.iter().filter(|finding|matches!(finding.verdict,Verdict::Malicious|Verdict::Suspicious)).count();app.threat_count.store(threats,Ordering::Relaxed);publish_findings(&app,findings);*app.selected_findings.lock().unwrap_or_else(|error|error.into_inner())=default_selected_indices();progress_finish(app.scan_cancel.load(Ordering::Relaxed));queue(format!("服务扫描完成：发现 {} 个威胁。",threats));}
             Err(error)=>{app.progress_mode.store(3,Ordering::Release);queue(format!("服务扫描失败：{}",error));}
         }
         let threats=app.threat_count.load(Ordering::Relaxed);
@@ -2929,11 +2974,6 @@ fn main() {
         let paths=args.iter().skip(2).map(PathBuf::from).collect();
         schedule_update_cleanup(paths);
     }
-    let expired=SystemTime::now().duration_since(UNIX_EPOCH).map(|value|value.as_secs()>=BUILD_EXPIRY_UNIX).unwrap_or(false);
-    if expired {
-        unsafe { MessageBoxW(null_mut(),wide("当前客户端构建已于 2026-10-20 到期，已禁止启动。请安装新的程序版本。").as_ptr(),wide("银狐专杀急救箱 · 版本已到期").as_ptr(),MB_OK|MB_ICONERROR); }
-        return;
-    }
     let self_relaunch=is_instance_handoff(&args);
     let _single_instance=match acquire_single_instance(self_relaunch){Some(guard)=>guard,None=>return};
     if !ensure_elevated() {
@@ -2944,7 +2984,7 @@ fn main() {
         return;
     }
     if let Err(error)=updater::embedded_engine(){
-        unsafe{MessageBoxW(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error}")).as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{MessageBoxW(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error:#}")).as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         std::process::exit(3);
     }
     if let Err(error)=scanner::Scanner::load(){

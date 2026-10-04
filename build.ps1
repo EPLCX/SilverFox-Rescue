@@ -8,7 +8,7 @@ $buildDllRequested = $args -contains '--build-dll'
 $projectRoot = $PSScriptRoot
 Push-Location -LiteralPath $projectRoot
 try {
-    if ([string]::IsNullOrWhiteSpace($env:SILVERFOX_CLOUD_URL)) { $env:SILVERFOX_CLOUD_URL = 'https://ysmj4k.bond' }
+    if ([string]::IsNullOrWhiteSpace($env:SILVERFOX_CLOUD_URL)) { $env:SILVERFOX_CLOUD_URL = 'https://***.sf-rescue.top' }
     $releaseKeyRoot = if ([string]::IsNullOrWhiteSpace($env:SILVERFOX_KEY_DIR)) { Join-Path $projectRoot 'releaseSecrets' } else { $env:SILVERFOX_KEY_DIR }
     $releaseKeyRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($releaseKeyRoot.Trim())
     foreach ($kind in @('rules', 'program')) {
