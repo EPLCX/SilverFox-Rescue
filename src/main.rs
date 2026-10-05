@@ -98,7 +98,7 @@ const ID_DIRECTORY_CANCEL:usize=391;
 const ID_DIRECTORY_SCAN:usize=392;
 const ID_DIRECTORY_TITLE:usize=393;
 const ID_DIRECTORY_ERROR:usize=395;
-const CLIENT_VERSION:&str="2026.10.4.1";
+const CLIENT_VERSION:&str="2026.10.5.1";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
 // The only terminal page in the scan/remediation flow. It is entered by the
 // remediation worker after all selected items have been processed, never by a
