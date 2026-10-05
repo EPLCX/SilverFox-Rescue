@@ -98,7 +98,7 @@ const ID_DIRECTORY_CANCEL:usize=391;
 const ID_DIRECTORY_SCAN:usize=392;
 const ID_DIRECTORY_TITLE:usize=393;
 const ID_DIRECTORY_ERROR:usize=395;
-const CLIENT_VERSION:&str="2026.10.3.2";
+const CLIENT_VERSION:&str="2026.10.4.1";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
 // The only terminal page in the scan/remediation flow. It is entered by the
 // remediation worker after all selected items have been processed, never by a
@@ -110,6 +110,7 @@ const WM_DEFERRED_ACTION: u32 = WM_APP + 0x43;
 const WM_PAGE_QUEUE_READY: u32 = WM_APP + 0x44;
 const WM_SETTINGS_SAVED: u32 = WM_APP + 0x45;
 const WM_PROGRAM_UPDATE_STATE: u32 = WM_APP + 0x46;
+const WM_STARTUP_CONNECTION_FAILED:u32=WM_APP+0x47;
 const BUTTON_ANIMATION_TIMER:usize=0x5346;
 const BUTTON_ANIMATION_MS:u64=150;
 const PROGRESS_ANIMATION_TIMER:usize=0x5347;
@@ -174,7 +175,8 @@ static STATE: OnceLock<Arc<AppState>>= OnceLock:: new();
 static FORCED_UPDATE: AtomicBool = AtomicBool::new(false);
 static FORCED_UPDATE_PAGE_SHOWN: AtomicBool = AtomicBool::new(false);
 static STARTUP_RULE_UPDATE:OnceLock<Mutex<Option<Result<String,String>>>>=OnceLock::new();
-fn version_footer_text()->String{format!("当前版本：{}  病毒库：{}",CLIENT_VERSION,updater::current_rule_version())}
+static STARTUP_CONNECTION_ERROR:OnceLock<String>=OnceLock::new();
+fn version_footer_text()->String{format!("程序：{}  病毒库：{}",CLIENT_VERSION,updater::current_rule_version())}
 static LAST_VERSION_FOOTER:Mutex<Option<String>>=Mutex::new(None);
 static SCAN_PRESENTATION:OnceLock<Mutex<Option<Instant>>>=OnceLock::new();
 struct ProgressAnimation { active:bool, started:usize, stage:usize, mode:usize, percent:f64, phase:f64, last:Instant }
@@ -600,7 +602,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             if last_footer.as_ref()!=Some(&version_footer){
                 *last_footer=Some(version_footer);
                 let dpi=dpi::window_dpi(hwnd).max(96)as i32;
-                let footer=RECT{left:24*dpi/96,top:client_height(hwnd)-45*dpi/96,right:360*dpi/96,bottom:client_height(hwnd)};
+                let footer=RECT{left:24*dpi/96,top:client_height(hwnd)-45*dpi/96,right:client_width(hwnd)-24*dpi/96,bottom:client_height(hwnd)};
                 InvalidateRect(hwnd,&footer,0);
             }
             drop(last_footer);
@@ -633,6 +635,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             0
         }
         WM_PAGE_QUEUE_READY => { drain_page_queue(hwnd); 0 }
+        WM_STARTUP_CONNECTION_FAILED => {
+            if let Some(error)=STARTUP_CONNECTION_ERROR.get(){
+                state().allow_close.store(true,Ordering::SeqCst);
+                DestroyWindow(hwnd);
+                MessageBoxW(null_mut(),wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}")).as_ptr(),wide("银狐专杀急救箱 · 更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
+            }
+            0
+        }
         WM_PROGRAM_UPDATE_STATE => {
             if state().ui_mode.load(Ordering::Acquire)==3 && state().subpage.load(Ordering::Acquire)==PAGE_PROGRAM_UPDATE {
                 render_program_update_page();
@@ -1093,10 +1103,10 @@ unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
         let status_font=paint_cache::font(-12*dpi/96);
         SelectObject(dc,status_font);
         SetTextColor(dc,0x00808080);
-        let current=short_scan_path(&visible_scan_path());
+        let current=visible_scan_path();
         let status=wide(&format!("当前项目：{}",current));
         let status_rect=RECT{left:scale(30),top:scale(92),right:client.right-scale(30),bottom:scale(112)};
-        if !native_text{draw_static_text_image(dc,&status_rect,&status,status_font,0x00808080,0x00FFFFFF,DT_VCENTER|DT_SINGLELINE);}
+        if !native_text{draw_static_text_image(dc,&status_rect,&status,status_font,0x00808080,0x00FFFFFF,DT_VCENTER|DT_SINGLELINE|windows_sys::Win32::Graphics::Gdi::DT_PATH_ELLIPSIS);}
         SelectObject(dc,hero_font);
         
         paint_progress(dc,client,dpi);
@@ -1180,7 +1190,7 @@ unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
     let old_footer = SelectObject(dc, footer_font);
     SetTextColor(dc, 0x00909090);
     // Keep the version label in a fixed left-side slot clear of the timer label.
-    let footer = RECT{left:scale(24),top:client.bottom-scale(45),right:(scale(360)).min(client.right-scale(24)),bottom:client.bottom};
+    let footer = version_footer_rect(dc,client,dpi);
     let version = wide(&version_footer_text());
     if !native_text{draw_static_text_image(dc,&footer,&version,footer_font,0x00708090,0x00FFFFFF,DT_VCENTER|DT_SINGLELINE);}
     SelectObject(dc, old_footer);
@@ -1188,11 +1198,14 @@ unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
     let _ = hwnd;
 }
 
-fn short_scan_path(path:&str)->String{
-    const LIMIT:usize=36;
-    let chars:Vec<char>=path.chars().collect();
-    if chars.len()<=LIMIT{return path.to_owned();}
-    format!("…{}",chars[chars.len()-(LIMIT-1)..].iter().collect::<String>())
+unsafe fn version_footer_rect(dc:HDC,client:&RECT,dpi:i32)->RECT{
+    let font=paint_cache::font(-13*dpi/96);
+    let old=SelectObject(dc,font);
+    let text=wide(&version_footer_text());
+    let mut extent=SIZE{cx:0,cy:0};
+    GetTextExtentPoint32W(dc,text.as_ptr(),(text.len()-1)as i32,&mut extent);
+    SelectObject(dc,old);
+    RECT{left:24*dpi/96,top:client.bottom-45*dpi/96,right:(24*dpi/96+extent.cx).min(client.right-24*dpi/96),bottom:client.bottom}
 }
 
 unsafe fn paint_progress(dc:HDC,client:&RECT,dpi:i32){
@@ -1229,14 +1242,11 @@ unsafe fn paint_progress(dc:HDC,client:&RECT,dpi:i32){
         let elapsed=now.saturating_sub(started)/1000;
         let percent=stage_progress_percent(done,total);
         let remain=if mode==2{*current_eta().lock().unwrap_or_else(|error|error.into_inner())}else{EtaResult::Estimating};
-        let phase=match stage{1=>"进程扫描",2=>"服务扫描",3=>"文件扫描",4=>"病毒库更新",5=>"启动项与系统配置",_=>"当前任务"};
+        let phase=match stage{1=>"进程扫描",2=>"服务扫描",3=>"文件扫描",4=>"病毒库更新",5=>"启动项扫描",_=>"当前任务"};
         let text=if stage==4{"正在检查病毒库更新…".into()}else if mode==1{format!("{} · 正在统计 · 已用 {:02}:{:02}",phase,elapsed/60,elapsed%60)}else if let EtaResult::Remaining(remain)=remain {format!("{} {:.0}% · 已用 {:02}:{:02}，还剩约 {:02}:{:02}",phase,percent,elapsed/60,elapsed%60,remain/60,remain%60)}else if percent>=100.0{format!("{} 100% · 已用 {:02}:{:02}",phase,elapsed/60,elapsed%60)}else if remain==EtaResult::Stalled{format!("{} {:.0}% · 已用 {:02}:{:02}，正在处理当前文件",phase,percent,elapsed/60,elapsed%60)}else{format!("{} {:.0}% · 已用 {:02}:{:02}，正在估算",phase,percent,elapsed/60,elapsed%60)};
         let mut wide_text:Vec<u16>=OsStr::new(&text).encode_wide().chain(Some(0)).collect();
-        // Reserve a wide right-aligned footer area for phase and timing text.
-        let timer_left=(client.right-scale(800)).max(scale(370));
-        // Leave a larger right-side inset so the final glyph's antialiasing
-        // pixels are not clipped by the client edge or a neighboring child.
-        let mut rect=RECT{left:timer_left,top:client.bottom-scale(45),right:client.right-scale(48),bottom:client.bottom};
+        let footer=version_footer_rect(dc,client,dpi);
+        let mut rect=RECT{left:footer.right+scale(12),top:footer.top,right:client.right-scale(24),bottom:client.bottom};
         let timer_font=paint_cache::font(-12*dpi/96);
         let prior_font=SelectObject(dc,timer_font);
         SetTextColor(dc,0x00707070);SetBkMode(dc,TRANSPARENT as i32);
@@ -1509,7 +1519,7 @@ fn scan_status_summary()->String{
     let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()as usize;
     let _elapsed=now.saturating_sub(started)/1000;
     let progress=if total>0{format!("{done} / {total}")}else{"正在统计".into()};
-    format!("{} 进度：{}",short_scan_path(&visible_scan_path()),progress)
+    format!("{} 进度：{}",visible_scan_path(),progress)
 }
 
 fn status_announcement_due(now:usize,last:usize)->bool{last==0||now.saturating_sub(last)>=8000}
@@ -1532,6 +1542,27 @@ mod accessibility_timing_tests{
             assert!(detail.bottom<s(120));
         }
     }
+    #[test]fn scan_footer_fits_phase_and_timing_at_supported_dpi(){unsafe{
+        use super::*;
+        let previous_version=updater::current_rule_version();
+        updater::set_current_rule_version("2026.10.3.2");
+        let dc=CreateCompatibleDC(null_mut());
+        assert!(!dc.is_null());
+        for dpi in [96,120,144,192]{
+            let s=|v:i32|v*dpi/96;
+            let client=RECT{left:0,top:0,right:s(735),bottom:s(558)};
+            let footer=version_footer_rect(dc,&client,dpi);
+            let font=paint_cache::font(-12*dpi/96);let old=SelectObject(dc,font);
+            for label in ["启动项与系统配置 59% · 已用 12:34，还剩约 56:78","启动项与系统配置 59% · 已用 12:34，正在处理当前文件"]{
+                let text=wide(label);let mut extent=SIZE{cx:0,cy:0};
+                assert_ne!(GetTextExtentPoint32W(dc,text.as_ptr(),(text.len()-1)as i32,&mut extent),0);
+                assert!(extent.cx<=client.right-s(24)-footer.right-s(12),"footer clipped at {dpi} DPI: {label}");
+            }
+            SelectObject(dc,old);
+        }
+        DeleteDC(dc);
+        updater::set_current_rule_version(&previous_version);
+    }}
 }
 
 #[cfg(test)]
@@ -1701,6 +1732,8 @@ fn each_subpage_has_an_opening_announcement(){
 fn painted_page_snapshots(){unsafe{
     use windows_sys::Win32::Graphics::Gdi::{GetDC,ReleaseDC,GetDIBits,BITMAPINFO,DIB_RGB_COLORS,BI_RGB};
     STATE.get_or_init(new_app_state);
+    let previous_version=updater::current_rule_version();
+    updater::set_current_rule_version("2026.10.3.2");
     let instance=GetModuleHandleW(null());let class=wide("SilverFoxPaintedSnapshotWindow");
     let wc=WNDCLASSW{lpfnWndProc:Some(DefWindowProcW),hInstance:instance,lpszClassName:class.as_ptr(),..std::mem::zeroed()};RegisterClassW(&wc);
     let hwnd=CreateWindowExW(0,class.as_ptr(),wide("").as_ptr(),WS_POPUP,0,0,735,558,null_mut(),null_mut(),instance,null());assert!(!hwnd.is_null());
@@ -1716,6 +1749,8 @@ fn painted_page_snapshots(){unsafe{
         *state().current_path.lock().unwrap_or_else(|error|error.into_inner())=r"C:\Users\Administrator\Downloads\sample.exe".into();
         state().scan_started_ms.store(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()as usize,Ordering::Release);
         state().progress_total.store(363,Ordering::Release);state().progress_done.store(215,Ordering::Release);
+        state().progress_mode.store(2,Ordering::Release);state().progress_stage.store(5,Ordering::Release);
+        *current_eta().lock().unwrap_or_else(|error|error.into_inner())=EtaResult::Stalled;
         let client=RECT{left:0,top:0,right:width,bottom:height};let white=CreateSolidBrush(0x00FFFFFF);FillRect(memory,&client,white);DeleteObject(white);
         paint_page(memory,hwnd,&client,96);paint_virtual_controls(memory,hwnd,&client,96);
         let mut info:BITMAPINFO=std::mem::zeroed();info.bmiHeader.biSize=40;info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
@@ -1728,6 +1763,7 @@ fn painted_page_snapshots(){unsafe{
     }
     }
     ui_rounding::simulate_windows_11(false);
+    updater::set_current_rule_version(&previous_version);
     VIRTUAL_MENU_OPEN=false;
     SelectObject(memory,previous);DeleteObject(bitmap);DeleteDC(memory);ReleaseDC(hwnd,screen);UI_FONT=null_mut();DeleteObject(font);DestroyWindow(hwnd);
 }}
@@ -1742,7 +1778,7 @@ unsafe fn announce_scan_status_if_due(hwnd:HWND){
     if update_presentation_elapsed().is_some(){announce_with_detail(hwnd,"正在检查病毒库更新…","正在准备病毒库…","silverfox.scan.status");return;}
     let (_,_,done,total)=visible_scan_progress();
     let progress=if total>0{format!("扫描进度：{done} / {total}")}else{"正在统计扫描项目".into()};
-    let path=short_scan_path(&visible_scan_path());
+    let path=visible_scan_path();
     announce_with_detail(hwnd,&progress,&format!("当前项目：{path}"),"silverfox.scan.status");
 }
 
@@ -1886,7 +1922,7 @@ unsafe fn update_progress(hwnd:HWND) {
     // paint, because that repaints the page while GDI is still composing it.
     let mut progress_rect=RECT{left:24*dpi/96,top:84*dpi/96,right:width-24*dpi/96,bottom:144*dpi/96};
     let mut status_rect=RECT{left:24*dpi/96,top:84*dpi/96,right:width-24*dpi/96,bottom:116*dpi/96};
-    let mut timer_rect=RECT{left:(width-800*dpi/96).max(370*dpi/96),top:client_height(hwnd)-48*dpi/96,right:width-48*dpi/96,bottom:client_height(hwnd)};
+    let mut timer_rect=RECT{left:24*dpi/96,top:client_height(hwnd)-45*dpi/96,right:width-24*dpi/96,bottom:client_height(hwnd)};
     if progress_changed{InvalidateRect(hwnd,&mut progress_rect,0);}
     if status_changed{InvalidateRect(hwnd,&mut status_rect,0);}
     if clock_changed||progress_changed{InvalidateRect(hwnd,&mut timer_rect,0);}
@@ -1957,11 +1993,22 @@ fn cancellable_rule_update(cancel:&AtomicBool)->Option<anyhow::Result<String>>{
         }
     }
 }
-fn begin_startup_rule_update(){
+fn report_startup_connection_failure(window:isize,error:&anyhow::Error){
+    if state().shutdown.load(Ordering::Acquire){return;}
+    if cloud::startup_connection_failure(error,cloud::internet_reachable)
+        &&STARTUP_CONNECTION_ERROR.set(format!("{error:#}")).is_ok(){
+        unsafe{PostMessageW(window as HWND,WM_STARTUP_CONNECTION_FAILED,0,0);}
+    }
+}
+fn begin_startup_rule_update(hwnd:HWND){
     let result=STARTUP_RULE_UPDATE.get_or_init(||Mutex::new(None));
+    let window=hwnd as isize;
     std::thread::spawn(move||{
         let client=cloud::CloudClient::configured();
-        let status=updater::update(&client.base_url).map_err(|error|format!("{error:#}"));
+        let status=updater::update(&client.base_url).map_err(|error|{
+            report_startup_connection_failure(window,&error);
+            format!("{error:#}")
+        });
         match &status{Ok(message)=>queue(format!("启动规则检查：{message}")),Err(error)=>queue(format!("启动规则检查：{error}"))};
         *result.lock().unwrap_or_else(|error|error.into_inner())=Some(status);
     });
@@ -2840,10 +2887,13 @@ fn program_update_available(manifest:&cloud::ProgramManifest)->bool{
     hex::encode(sha2::Sha256::digest(&bytes))!=expected.to_ascii_lowercase()
 }
 
-fn check_program_update_on_startup() {
-    std::thread::spawn(|| {
+fn check_program_update_on_startup(hwnd:HWND) {
+    let window=hwnd as isize;
+    std::thread::spawn(move|| {
         let client = cloud::CloudClient::configured();
-        let Ok(manifest) = client.program_manifest() else { return; };
+        let manifest=match client.program_manifest(){Ok(manifest)=>manifest,Err(error)=>{
+            report_startup_connection_failure(window,&error);return;
+        }};
         if !manifest.available || manifest.product != "silverfox-rescue" { return; }
         let Some(version) = manifest.latest_version.as_deref() else { return; };
         let current = CLIENT_VERSION;
@@ -2993,10 +3043,7 @@ fn main() {
     }
     let user_mode_protection = protection:: enable_user_mode_protection();
     STATE.set(new_app_state()).ok();
-    begin_startup_rule_update();
-    if !debug_program_update_page {
-        check_program_update_on_startup();
-    } else {
+    if debug_program_update_page {
         set_program_update_state("", "", "Debug 显示检查：未启动更新程序");
     }
     unsafe {
@@ -3026,6 +3073,8 @@ fn main() {
         center_window_on_cursor_monitor(hwnd);
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+        begin_startup_rule_update(hwnd);
+        if !debug_program_update_page{check_program_update_on_startup(hwnd);}
         let mut m: MSG = std:: mem:: zeroed();
         while GetMessageW(&mut m, null_mut(), 0, 0)>0 {
             TranslateMessage(&m);

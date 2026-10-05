@@ -10,6 +10,19 @@ pub fn https_agent()->anyhow::Result<&'static ureq::Agent>{
     Ok(AGENT.get_or_init(||ureq::AgentBuilder::new().user_agent("SilverFoxRescue/2026.09").try_proxy_from_env(false).timeout_connect(Duration::from_secs(3)).timeout_read(Duration::from_secs(8)).timeout_write(Duration::from_secs(8)).build()))
 }
 
+pub fn startup_connection_failure(error:&anyhow::Error,probe:impl FnOnce()->bool)->bool{
+    let connection_failed=error.chain().any(|cause|cause.downcast_ref::<ureq::Error>().is_some_and(|error|
+        matches!(error.kind(),ureq::ErrorKind::Dns|ureq::ErrorKind::ConnectionFailed|ureq::ErrorKind::Io)));
+    connection_failed&&probe()
+}
+
+pub fn internet_reachable()->bool{
+    let result=ureq::AgentBuilder::new().try_proxy_from_env(false)
+        .timeout(Duration::from_secs(3)).redirects(0).build().get("https://1.1.1.1/").call();
+    // An HTTP error response still proves that the HTTPS connection succeeded.
+    matches!(result,Ok(_)|Err(ureq::Error::Status(_, _)))
+}
+
 #[derive(Clone)]
 pub struct CloudClient{pub base_url:String}
 
@@ -164,5 +177,17 @@ mod network_diagnostics {
         assert_eq!(download_url(base,"https://previous.example.com/public/program/beta/a.zip"),format!("{base}/public/program/beta/a.zip"));
         assert_eq!(download_url(base,"https://cdn.example.com/a.zip"),"https://cdn.example.com/a.zip");
         assert_eq!(download_url(base,"http://previous.example.com/public/rules/a.zip"),"http://previous.example.com/public/rules/a.zip");
+    }
+}
+
+#[cfg(test)]mod startup_connection_tests{
+    use super::*;
+    #[test]fn online_connection_failure_blocks_and_offline_failure_continues(){
+        let transport:ureq::Error=std::io::Error::new(std::io::ErrorKind::TimedOut,"update connection timed out").into();
+        let error=anyhow::Error::new(transport).context("update manifest failed");
+        assert!(startup_connection_failure(&error,||true));
+        assert!(!startup_connection_failure(&error,||false));
+        let validation=anyhow::anyhow!("invalid manifest signature");
+        assert!(!startup_connection_failure(&validation,||panic!("validation failure must not probe connectivity")));
     }
 }
