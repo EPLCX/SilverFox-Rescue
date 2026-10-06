@@ -199,6 +199,8 @@ impl Scanner {
                 if matches!(decision.verdict,Verdict::Malicious|Verdict::Suspicious)
                     && member.sample.len() as u64==member.len
                     && crate::self_signature::verify_project_signed_bytes(&member.sample,&self.version){continue;}
+                if decision.verdict==Verdict::Malicious && member.sample.len() as u64==member.len
+                    && crate::safe_signature::exemption(&virtual_path,&member.sample).is_some(){continue;}
                 match decision.verdict {
                     Verdict::Malicious => verdict=Verdict::Malicious,
                     Verdict::Suspicious if verdict!=Verdict::Malicious => verdict=Verdict::Suspicious,
@@ -229,6 +231,12 @@ impl Scanner {
             && crate::self_signature::verify_project_signed_bytes(&sample,&self.version){
             return Ok(Some(Finding{path:path.into(),sha256:Some(digest),verdict:Verdict::Clean,score:0,
                 evidence:vec!["本项目签名有效，已豁免查杀".into()],source:"local-project-signature".into()}));
+        }
+        if decision.verdict==Verdict::Malicious && sample.len() as u64==meta.len() {
+            if let Some(reason)=crate::safe_signature::exemption(path,&sample){
+                return Ok(Some(Finding{path:path.into(),sha256:Some(digest),verdict:Verdict::Clean,score:0,
+                    evidence:vec![reason.into()],source:"local-safe-signature".into()}));
+            }
         }
         Ok(Some(Finding { path: path.into(), sha256: Some(digest), verdict:decision.verdict, score:decision.score, evidence:decision.evidence, source: "local-ml".into() }))
     }

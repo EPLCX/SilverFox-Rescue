@@ -1,0 +1,66 @@
+[
+  {
+    "path": "F:\\sliverfox-file\\safe\\POraKs.exe",
+    "status": "Valid",
+    "message": "Signature verified.",
+    "subject": "CN=Tencent Technology (Shenzhen) Company Limited, O=Tencent Technology (Shenzhen) Company Limited, L=Shenzhen, S=Guangdong Province, C=CN",
+    "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+    "thumbprint": "617C4EDB4F205FCA0E5C07B9C52AA8D695FD122C"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\uninstall_3.exe",
+    "status": "Valid",
+    "message": "Signature verified.",
+    "subject": "CN=\"NetEase (Hangzhou) Network Co., Ltd\", O=\"NetEase (Hangzhou) Network Co., Ltd\", L=杭州市, S=浙江省, C=CN, SERIALNUMBER=91330000788831167A, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=浙江省, OID.1.3.6.1.4.1.311.60.2.1.3=CN",
+    "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+    "thumbprint": "2C50C512FF08ABBFFA158D325212F714ACA0E6CB"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\wininst-14.0.exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\wininst-14.0.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\NsisHelper.dll",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\NsisHelper.dll is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\应用程序向导.exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\应用程序向导.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\1531-2026-05-28100058-1779933658632.exe",
+    "status": "Valid",
+    "message": "Signature verified.",
+    "subject": "CN=\"Hainan YouQu Technology Co., Ltd\", O=\"Hainan YouQu Technology Co., Ltd\", L=Sanya, S=Hainan, C=CN, SERIALNUMBER=91460000MA5T92TJ7C, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Hainan, OID.1.3.6.1.4.1.311.60.2.1.3=CN",
+    "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+    "thumbprint": "DA53BFC80A424095652053F05886C18348B79906"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\SOCKS5网络代理向导.exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\SOCKS5网络代理向导.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\phoenix_core.dll",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\phoenix_core.dll is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  }
+]

@@ -6,6 +6,7 @@ import json
 import math
 import re
 from pathlib import Path
+import numpy as np
 
 if __package__:
     from .tool_paths import ENGINE_DLL, MODEL_HEADER, MODEL_REPORT
@@ -30,6 +31,7 @@ def main():
     parser.add_argument("--header", type=Path, default=MODEL_HEADER)
     parser.add_argument("--engine", type=Path, default=ENGINE_DLL)
     parser.add_argument("--report", type=Path, default=MODEL_REPORT)
+    parser.add_argument("--vectors", type=Path, default=MODEL_REPORT.parent / "static_ml_parity_vectors.npz")
     args = parser.parse_args()
     header = args.header.read_text(encoding="utf-8")
     offsets = array(header, "TREE_OFFSETS", True)
@@ -42,6 +44,29 @@ def main():
     slope = float(re.search(r"CALIBRATION_SLOPE = ([^;]+);", header).group(1))
     intercept = float(re.search(r"CALIBRATION_INTERCEPT = ([^;]+);", header).group(1))
     dll = ctypes.CDLL(str(args.engine.resolve()))
+    vectors = np.load(args.vectors, allow_pickle=False)
+    if vectors["raw_score"].shape != (len(vectors["x"]), class_count):
+        raise RuntimeError("test-vector dimensions differ from the generated model")
+    raw_native = dll.sf_ml_raw_features
+    pointer = ctypes.POINTER(ctypes.c_double)
+    raw_native.argtypes = [pointer, ctypes.c_size_t, pointer, ctypes.c_size_t]
+    raw_native.restype = ctypes.c_int
+    actual_raw = np.zeros(vectors["raw_score"].shape, dtype=np.float64)
+    for i, row in enumerate(vectors["x"]):
+        row = np.ascontiguousarray(row, dtype=np.float64)
+        output = actual_raw[i]
+        if raw_native(row.ctypes.data_as(pointer), len(row), output.ctypes.data_as(pointer), class_count) != class_count:
+            raise RuntimeError(f"native feature-vector inference failed on row {i}")
+    raw_error = float(np.abs(actual_raw-vectors["raw_score"]).max())
+    if not np.isfinite(raw_error) or raw_error >= 1e-6:
+        raise RuntimeError(f"native raw-score mismatch: {raw_error}")
+    for invalid in (np.nan, np.inf, -np.inf):
+        row = np.ascontiguousarray(vectors["x"][0], dtype=np.float64).copy()
+        row[0] = invalid
+        if raw_native(row.ctypes.data_as(pointer), len(row), actual_raw[0].ctypes.data_as(pointer), class_count) != 0:
+            raise RuntimeError("native inference accepted non-finite features")
+    print(json.dumps({"vector_count": len(actual_raw), "max_raw_score_error": raw_error,
+                      "nonfinite_features_rejected": True}), flush=True)
     metadata_function(args.engine)
     native = dll.sf_ml_probability_context
     native.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint64,
@@ -83,7 +108,11 @@ def main():
                        "absolute_error": abs(expected-actual)})
     worst = max(errors, key=lambda row: row["absolute_error"])
     print(json.dumps({"checked": len(errors), "worst": worst}, ensure_ascii=False, indent=2))
-    if worst["absolute_error"] > 1e-6:
+    (args.report.parent / "native_ml_verification.json").write_text(
+        json.dumps({"vector_count": len(actual_raw), "max_raw_score_error": raw_error,
+                    "nonfinite_features_rejected": True, "file_checks": errors}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+    if not all(math.isfinite(row["absolute_error"]) for row in errors) or worst["absolute_error"] > 1e-6:
         raise SystemExit("native model differs from generated-tree reference")
 
 

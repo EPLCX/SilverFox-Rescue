@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import struct
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,7 @@ else:
 prepare_temp_dir()
 
 import numpy as np
+import pefile
 import lightgbm as lgb
 from sklearn.metrics import (
     average_precision_score,
@@ -222,6 +224,26 @@ def extract_features(data: bytes, total_size: int, path: Path | None = None,
                            np.ctypeslib.as_array(metadata)[list(MODEL_METADATA_INDICES)].copy()))
 
 
+def safe_component_group(data: bytes, path: Path) -> str:
+    """Keep versions/copies of a PE component together in a flat safe corpus."""
+    try:
+        with pefile.PE(data=data, fast_load=True) as pe:
+            pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+            for block in getattr(pe, "FileInfo", []):
+                for info in block:
+                    for table in getattr(info, "StringTable", []):
+                        entries = {key.decode("utf-8", "replace"): value.decode("utf-8", "replace").strip().casefold()
+                                   for key, value in table.entries.items()}
+                        original = entries.get("OriginalFilename", "").replace("\\", "/").rsplit("/", 1)[-1]
+                        if original:
+                            identity = [entries.get("CompanyName", ""), entries.get("ProductName", ""), original]
+                            return "safe-component:" + json.dumps(identity, ensure_ascii=False)
+    except pefile.PEFormatError:
+        pass
+    name = re.sub(r"\s*\(\d+\)(?=\.[^.]+$)", "", path.name.casefold())
+    return "safe-filename:" + name
+
+
 def load_samples(dataset: Path) -> tuple[list[Sample], list[dict[str, object]]]:
     definitions = [("safe", 0), ("others-virus", 1), ("virus", 1)]
     samples: list[Sample] = []
@@ -231,17 +253,20 @@ def load_samples(dataset: Path) -> tuple[list[Sample], list[dict[str, object]]]:
         path, root, source, label = task
         try:
             family = (f"virus/{path.relative_to(root).parts[0]}" if path.parent != root else "virus/Generic") if source == "virus" else source
+            family_root = root / path.relative_to(root).parts[0] if source == "virus" and path.parent != root else root
             size = path.stat().st_size
             if size > MAX_RUNTIME_FILE:
                 return None, {"path": str(path), "reason": "larger_than_runtime_limit", "size": size}
             with path.open("rb") as handle:
-                data = handle.read(READ_LIMIT)
-            peers = sibling_names(path, root)
+                data = handle.read(min(size, READ_LIMIT))
+            peers = sibling_names(path, family_root)
             features = extract_features(data, size, path, peers)
             if features[267] < 0.5:
                 return None, {"path": str(path), "reason": "unsupported_non_pe", "size": size}
             group = (f"bundle:{family}:{path.parent.relative_to(root)}"
-                     if path.parent != root and peers else f"sample:{source}:{path.relative_to(root)}")
+                     if path.parent != family_root else f"sample:{source}:{path.relative_to(root)}")
+            if source == "safe" and path.parent == root:
+                group = safe_component_group(data, path)
             return Sample(path, label, family, size, group, features), None
         except (OSError, ValueError) as error:
             return None, {"path": str(path), "reason": f"read_error:{error}"}
@@ -251,7 +276,7 @@ def load_samples(dataset: Path) -> tuple[list[Sample], list[dict[str, object]]]:
             raise FileNotFoundError(f"missing class directory: {root}")
         paths = sorted(path for path in root.rglob("*") if path.is_file())
         tasks = ((path, root, family, label) for path in paths)
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             for position, (sample, reason) in enumerate(executor.map(read_one, tasks), 1):
                 if sample is not None: samples.append(sample)
                 if reason is not None: skipped.append(reason)
@@ -277,7 +302,7 @@ def load_extra_safe(paths: list[Path]) -> list[Sample]:
         if size > MAX_RUNTIME_FILE:
             raise ValueError(f"extra safe regression file exceeds runtime limit: {path}")
         with path.open("rb") as handle:
-            data = handle.read(READ_LIMIT)
+            data = handle.read(min(size, READ_LIMIT))
         features = extract_features(data, size, path, sibling_names(path))
         if features[267] < 0.5:
             raise ValueError(f"extra safe regression file is not a valid PE: {path}")

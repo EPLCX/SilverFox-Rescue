@@ -1,0 +1,317 @@
+{
+  "false_positive_files_audited": 40,
+  "unique_false_positive_hashes": 39,
+  "same_size_candidates_hashed": 55,
+  "cross_label_conflicts": [
+    {
+      "sha256": "da169efdf43f4f2e87937efaaaf328dd659e28740411d1904a5bd0908ea5e061",
+      "matches": [
+        {
+          "path": "F:\\sliverfox-file\\safe\\adig.exe",
+          "class_directory": "safe"
+        },
+        {
+          "path": "F:\\sliverfox-file\\others-virus\\da169efdf43f4f2e87937efaaaf328dd659e28740411d1904a5bd0908ea5e061.exe",
+          "class_directory": "others-virus"
+        }
+      ]
+    },
+    {
+      "sha256": "676a2a7b94ca2f8ec76352ee656e4d075bb342bd7ad6efbc7c19c060001eace7",
+      "matches": [
+        {
+          "path": "F:\\sliverfox-file\\safe\\POraKs.exe",
+          "class_directory": "safe"
+        },
+        {
+          "path": "F:\\sliverfox-file\\safe\\V9YWjN.exe",
+          "class_directory": "safe"
+        },
+        {
+          "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\AU0V5T.exe",
+          "class_directory": "virus"
+        },
+        {
+          "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\PpR0B1.exe",
+          "class_directory": "virus"
+        },
+        {
+          "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\Qs14Ad.exe",
+          "class_directory": "virus"
+        },
+        {
+          "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\V9YWjN.exe",
+          "class_directory": "virus"
+        },
+        {
+          "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\xMVah6.exe",
+          "class_directory": "virus"
+        }
+      ]
+    }
+  ],
+  "all_content_matches": {
+    "33b930c63412f4173bda8dd5c9fb822247f49081f09a1aab7a575ff1a33ead02": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\1531-2026-05-28100058-1779933658632.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "179b874362fdd6d4461e6e5704f7f273e4cc0d4936d4a9787eaa52f7753c3a99": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\360zip.sfx",
+        "class_directory": "safe"
+      }
+    ],
+    "da169efdf43f4f2e87937efaaaf328dd659e28740411d1904a5bd0908ea5e061": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\adig.exe",
+        "class_directory": "safe"
+      },
+      {
+        "path": "F:\\sliverfox-file\\others-virus\\da169efdf43f4f2e87937efaaaf328dd659e28740411d1904a5bd0908ea5e061.exe",
+        "class_directory": "others-virus"
+      }
+    ],
+    "4a80438e8c8aa89b9e356fb9320b57d7c01c9b1ff66e7b8fdf69d4022024750c": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\akshhl.sys",
+        "class_directory": "safe"
+      }
+    ],
+    "63ac9315688dc5c67b79dbbd0205f69e3dafec1c4cb104b9f806809472819142": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\aksusb.sys",
+        "class_directory": "safe"
+      }
+    ],
+    "05de24a09c46a0a19ba78ce69b42934972a11c687935f179f77fab9c39c06d48": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\AMDBugReportTool.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "0aa7ddd7ae75d3e3b7cbfd08f5cea7d01ead752d07a3174a6c2bc331d3fb7c6a": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\day.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "3d676ce6e3a12c14f275b03f64d73d49463a0ff946a5f661b603559025e71a84": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\Dokan.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "10bb5d7f37cb261da859676e974ca5287391a88a87c5730f3342b30bfedb64b0": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\dotFix.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "89926f3e826ff073cfdfeeefc0d2ebd15c02bfaf2248106933918561728868d1": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\EasiUpdateSetup.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "2829b538ee44d1078924f9413334ba61b2834b5e3d802adcf0f1e4985d489fca": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\e_sqlite3.dll",
+        "class_directory": "safe"
+      }
+    ],
+    "1dccc5db26b8246c5edf872da2898a981dac5e7fc7bad41a862e37e233b36495": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\Firefox Setup 155.0.1.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "2746289c58b2c703b78ee0a203ad3eb264c2db5f7eae5484c9e84b261fb6d062": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\GoogleEarthProSetup_7.3.2.5776.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "b8b20530e37fa52c668cd447d9e70e3f0627c34cf3e6e21259a845224366b412": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\ieinstal (2).exe",
+        "class_directory": "safe"
+      }
+    ],
+    "353d1843afa850234367d4aba3970d3aa25b529400f552e98d067ae17f78606b": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\inartboard.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "40921b7262e1136c85ae1de03fabde0eb138adbffa98badbb508e2b914c40c92": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\kaspersky4win202121.23.6.614zh-Hans_46411.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "35f5a53689cd433b1ad0f1bd200f0f6b77135e6f13bc91955d6df81e337d962d": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\NsisHelper.dll",
+        "class_directory": "safe"
+      }
+    ],
+    "4724057d84bd4943901a8f426d992e21f6308301b8719469bdac2366eec04fa8": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\OpenGL应用程序向导.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "b7a337893fed6a7f50dd47216efa38aa2ea9c0f8ed7981511df753752f1d7418": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\PerfectCalc.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "966821c2a1e138decd4d9d07cbc7459a3cb2e860ae044d7552283f2e3ac4a854": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\phoenix_core.dll",
+        "class_directory": "safe"
+      }
+    ],
+    "676a2a7b94ca2f8ec76352ee656e4d075bb342bd7ad6efbc7c19c060001eace7": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\POraKs.exe",
+        "class_directory": "safe"
+      },
+      {
+        "path": "F:\\sliverfox-file\\safe\\V9YWjN.exe",
+        "class_directory": "safe"
+      },
+      {
+        "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\AU0V5T.exe",
+        "class_directory": "virus"
+      },
+      {
+        "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\PpR0B1.exe",
+        "class_directory": "virus"
+      },
+      {
+        "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\Qs14Ad.exe",
+        "class_directory": "virus"
+      },
+      {
+        "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\V9YWjN.exe",
+        "class_directory": "virus"
+      },
+      {
+        "path": "F:\\sliverfox-file\\virus\\SilverFox.W\\xMVah6.exe",
+        "class_directory": "virus"
+      }
+    ],
+    "2d2e739696685a22e04a74fad3e9ed5f998619fd184eee5c42e680e6749c7e97": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\QQLiveUninstaller.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "d88306fe84102af8b65cda0c9cb740dffd1fec34c61968e8b6ed24f4c62e65af": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\QzoneMusicUninst.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "ea1e77ecb30cfe0a2f18b1d156251bbcdbda159c224631401091ffab1d7cbb52": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\samplerate.dll",
+        "class_directory": "safe"
+      }
+    ],
+    "79506e02a602c484c33a67bb5a0735ec5704de5c856d1118cae98102850dc1d1": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\SliverFoxKiller.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "2139ad3c77e9dd65adfab2ae0858a991c89a1508f67413c3079909807c57217a": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\SOCKS5网络代理向导.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "9913225feda352d3662c6a2498ccbe3da39fe0a5abb899f31aa7ea8bfbb99fd4": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\TestApp.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "d834c5d6c9232717fe2b2271b0c215e7148aaf5a5df30eab2521caf85444bdd5": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\ToDeskAudio.sys",
+        "class_directory": "safe"
+      }
+    ],
+    "b7e4b01cf0bf9908c62d9ff631479156f4e73488f28229e628c7fe86484f284f": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\uninst (4).exe",
+        "class_directory": "safe"
+      }
+    ],
+    "5b4b53ca345a032470fe04c631d0ed77e4f79dd3eff249acb01ad56b8c3893b0": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\Uninstall (5).exe",
+        "class_directory": "safe"
+      }
+    ],
+    "c08f728f3eb6d3ff818f311751d7a824639d1cdbf0cd11f3c82f0dc888363d15": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\uninstall_3.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "fb6097a0baead6c8a840fbf930825dac6a55c84f7b157f0158b3e71c3371a201": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\Updater.dll",
+        "class_directory": "safe"
+      }
+    ],
+    "d65eca2d89032b52107c062893bb7a766f02710c76255297022ad2baa351c186": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\UU-6.16.1-overseas.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "76b86e36d2abc605d7aaba7d075ea8aa3b1a82d7891017508cc5e559792a7213": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\v2rayN.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "951f9bc353fb7e6b20d4ea6395ac000a22c264dda86ff09872225b8e062c5ac2": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\VMProtect.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "cd8e84c1f8d1ee3a7014343e3fb236329d2b67c1ec233ea4b208d99e3f95105b": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\wininst-14.0.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "c30fba54c1852b3cb371477d69fc5fccef0a5abff2493e59103a0c9fdbfb3663": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\ws.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "d860623f7cd1bdfe17c5664587ef1273c692b930f23c9c21f56d26bd8eaa17a9": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\应用程序向导.exe",
+        "class_directory": "safe"
+      }
+    ],
+    "02fa6e1abef1d31caea41eeb3bd10996ceb7f30932eaf5d7f696daf0cb53869e": [
+      {
+        "path": "F:\\sliverfox-file\\safe\\通用密码登录管理向导.exe",
+        "class_directory": "safe"
+      }
+    ]
+  }
+}

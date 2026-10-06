@@ -1,0 +1,102 @@
+{
+  "suspicious_threshold": 0.6770026820360666,
+  "malicious_threshold": 0.9003467305902508,
+  "samples": [
+    {
+      "path": "F:\\sliverfox-file\\safe\\SliverFoxKiller.exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.9959156882454363,
+      "raw_probability": 0.999125955186438,
+      "final_calibration_oof_probability": 0.9959156882454363,
+      "predicted_family": "Generic",
+      "group": "safe-filename:sliverfoxkiller.exe",
+      "fold": 4,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\Firefox Setup 155.0.1.exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.976620127618156,
+      "raw_probability": 0.9882921284903917,
+      "final_calibration_oof_probability": 0.976620127618156,
+      "predicted_family": "SilverFox",
+      "group": "safe-component:[\"mozilla\", \"firefox\", \"7zs.sfx.exe\"]",
+      "fold": 3,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\Uninstall (5).exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.9305755998438916,
+      "raw_probability": 0.9403027313976814,
+      "final_calibration_oof_probability": 0.9305755998438916,
+      "predicted_family": "SilverFox",
+      "group": "safe-filename:uninstall.exe",
+      "fold": 5,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\inartboard.exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.9098723598111444,
+      "raw_probability": 0.9119929193552612,
+      "final_calibration_oof_probability": 0.9098723598111444,
+      "predicted_family": "SilverFox",
+      "group": "safe-filename:inartboard.exe",
+      "fold": 3,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\day.exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.8761988796594661,
+      "raw_probability": 0.8598030960130173,
+      "final_calibration_oof_probability": 0.8761988796594661,
+      "predicted_family": "Extortion",
+      "group": "safe-filename:day.exe",
+      "fold": 2,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\AMDBugReportTool.exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.8424723667842686,
+      "raw_probability": 0.8021592512886907,
+      "final_calibration_oof_probability": 0.8424723667842686,
+      "predicted_family": "Generic",
+      "group": "safe-filename:amdbugreporttool.exe",
+      "fold": 5,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\QQLiveUninstaller.exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.7349664355440089,
+      "raw_probability": 0.6058299898698791,
+      "final_calibration_oof_probability": 0.7349664355440089,
+      "predicted_family": "Generic",
+      "group": "safe-component:[\"tencent corporation\", \"tencentvideo\", \"qqlivesetup_{c0dc-697a-6a57-4d4f-8529-0d79-bf0f-8980-c0dc-697a-6a57-4d4f-8529-0d79-bf0f-8980-7075-f6c0-61c2-4e31-afd4-281b-a03d-081c}.exe\"]",
+      "fold": 1,
+      "split": "outer_cv"
+    },
+    {
+      "path": "F:\\sliverfox-file\\safe\\uninst (4).exe",
+      "label": 0,
+      "family": "safe",
+      "probability": 0.7048739148535651,
+      "raw_probability": 0.55211738965806,
+      "final_calibration_oof_probability": 0.7048739148535651,
+      "predicted_family": "Generic",
+      "group": "safe-filename:uninst.exe",
+      "fold": 4,
+      "split": "outer_cv"
+    }
+  ]
+}

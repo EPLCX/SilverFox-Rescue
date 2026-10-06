@@ -34,8 +34,10 @@ def main() -> None:
         raise RuntimeError("header and evaluation report refer to different models")
     dev = [row for row in report["out_of_fold_samples"] if row["split"] == "development"]
     hold = [row for row in report["out_of_fold_samples"] if row["split"] == "holdout"]
+    if not dev and "outer_cv" in report:
+        dev = report["out_of_fold_samples"]
     dev_y = np.asarray([row["label"] for row in dev], dtype=np.int32)
-    dev_p = np.asarray([row["probability"] for row in dev], dtype=np.float64)
+    dev_p = np.asarray([row.get("final_calibration_oof_probability", row["probability"]) for row in dev], dtype=np.float64)
     hold_y = np.asarray([row["label"] for row in hold], dtype=np.int32)
     hold_p = np.asarray([row["probability"] for row in hold], dtype=np.float64)
     suspicious = report["development_suspicious_operating_point"]["threshold"]
@@ -48,15 +50,16 @@ def main() -> None:
     if count != 1:
         raise RuntimeError("expected one generated malicious threshold")
     report["development_malicious_operating_point"] = point(dev_y, dev_p, malicious)
-    report["holdout_malicious_operating_point"] = point(hold_y, hold_p, malicious)
+    if hold:
+        report["holdout_malicious_operating_point"] = point(hold_y, hold_p, malicious)
+        report["holdout_malicious_note"] = "Exploratory evaluation of the selected threshold on saved holdout predictions."
     report["malicious_threshold_policy"] = {"development_max_false_positive_rate": args.max_fpr,
                                            "floor": floor}
     report["evaluation"] += "; malicious tier retuned post-hoc on development predictions"
-    report["holdout_malicious_note"] = "Exploratory evaluation of the selected threshold on saved holdout predictions."
     args.header.write_text(changed, encoding="utf-8", newline="\n")
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"development": report["development_malicious_operating_point"],
-                      "holdout_exploratory": report["holdout_malicious_operating_point"]},
+                      "holdout_exploratory": report.get("holdout_malicious_operating_point")},
                      ensure_ascii=False, indent=2))
 
 

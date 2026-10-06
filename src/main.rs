@@ -5,6 +5,7 @@ mod engine_host;
 mod gpu_scan;
 mod model;
 mod protection;
+mod safe_signature;
 mod process_control;
 mod quarantine;
 mod container_scan;

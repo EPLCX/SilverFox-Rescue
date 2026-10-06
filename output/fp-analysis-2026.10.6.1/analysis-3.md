@@ -1,0 +1,201 @@
+# 第3组：8个OOF白样本误报静态分析
+
+恶意阈值0.9003467305902508，可疑阈值0.6770026820360666。本组3个超过恶意阈值，另5个在可疑区间。分数是原报告5折OOF经校准的值；本报告描述结构相似性的解释，未把最终全量模型的学习结果当作原OOF归因。样本只读取、未执行；完整PE/导入/签名/特征证据在evidence-3.json。
+
+|样本|OOF概率|预测家族|阈值区间|签名|白标签支持|
+|---|---:|---|---|---|---|
+|samplerate.dll|0.982392|Generic|恶意|NotSigned|白标签支持较强|
+|PerfectCalc.exe|0.969614|Extortion|恶意|NotSigned|白标签支持中等|
+|ieinstal (2).exe|0.924415|Extortion|恶意|NotSigned|白标签支持中等|
+|dotFix.exe|0.892178|Generic|可疑|Valid|白标签支持强|
+|Dokan.exe|0.853918|Extortion|可疑|Valid|白标签支持强|
+|TestApp.exe|0.797251|Extortion|可疑|NotSigned|白标签支持较弱|
+|e_sqlite3.dll|0.720140|SilverFox|可疑|NotSigned|白标签支持较强|
+|EasiUpdateSetup.exe|0.696769|Generic|可疑|NotSigned|白标签支持中等偏弱|
+
+## samplerate.dll
+
+路径：`F:\sliverfox-file\safe\samplerate.dll`  
+SHA256：`ea1e77ecb30cfe0a2f18b1d156251bbcdbda159c224631401091ffab1d7cbb52`  
+大小：1,494,528字节；架构：x64；入口RVA：0x5a54；OOF fold：2；分组：`safe-filename:samplerate.dll`。
+
+签名：NotSigned；签名主体：无；证书表offset=0，size=0；overlay offset=None，size=0，比例=0.0000%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|21504|21416|0x60000020|6.4026|
+|.rdata|0x7000|1468928|1468490|0x40000040|7.6918|
+|.data|0x16e000|512|488|0xc0000040|2.2168|
+|.pdata|0x16f000|1536|1524|0x40000040|4.6491|
+|.rsrc|0x170000|512|480|0x40000040|4.7086|
+|.reloc|0x171000|512|128|0x42000040|1.6154|
+
+**身份与白标签证据：** 白标签支持较强：音频重采样库身份有实际导出与内嵌字符串支持。 20个具名导出均为src_*重采样接口，包括src_process/src_simple/src_set_ratio；内嵌libsamplerate-0.2.2版权字符串与E:\vcpkg\buildtrees\libsamplerate\x64-windows-rel\src\samplerate.pdb。只导入CRT和Kernel32基础运行库。
+
+**与恶意PE相似的结构（推断）：** 1,468,928字节.rdata占文件98.29%，熵7.6918，全文件熵7.6983；数据密集型计算库容易与高熵负载混淆。无版本资源，无签名。没有进程注入/持久化/加密API计数。高熵数据节应结合音频库导出理解。
+
+**复核建议：** 最适合作为高熵只读数据库误报的代表；获取原始软件包核对SHA256后保留白标签。
+
+## PerfectCalc.exe
+
+路径：`F:\sliverfox-file\safe\PerfectCalc.exe`  
+SHA256：`b7a337893fed6a7f50dd47216efa38aa2ea9c0f8ed7981511df753752f1d7418`  
+大小：261,632字节；架构：x86；入口RVA：0xbf920；OOF fold：3；分组：`safe-component:["任软工作室", "perfectcalc", "perfectcalc.exe"]`。
+
+签名：NotSigned；签名主体：无；证书表offset=0，size=0；overlay offset=None，size=0，比例=0.0000%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|UPX0|0x1000|0|536576|0xe0000080|0.0000|
+|UPX1|0x84000|244736|245760|0xe0000040|7.9216|
+|.rsrc|0xc0000|15872|16384|0xc0000040|5.1406|
+
+**身份与白标签证据：** 白标签支持中等：产品版本资源与桌面应用依赖一致，UPX壳使静态内部业务可见度有限。 版本资源为任软工作室/神奇计算器/PerfectCalc 1.5.0.50；导入GUI、GDI、对话框、OLE、版本查询接口。
+
+**与恶意PE相似的结构（推断）：** UPX0空raw、virtual_size536576，UPX1熵7.9216；UPX0与UPX1均RWX，入口0xbf920在UPX1内。仅16个可见导入，却有VirtualAlloc/VirtualProtect/LoadLibrary/GetProcAddress。典型压缩壳形态与打包恶意PE相似。
+
+**复核建议：** 复核原始发行包或经人工确认的同哈希来源；不要用Extortion家族预测代替勒索行为证据。
+
+## ieinstal (2).exe
+
+路径：`F:\sliverfox-file\safe\ieinstal (2).exe`  
+SHA256：`b8b20530e37fa52c668cd447d9e70e3f0627c34cf3e6e21259a845224366b412`  
+大小：373,248字节；架构：x86；入口RVA：0x23020；OOF fold：2；分组：`safe-component:["microsoft corporation", "windows® internet explorer", "ieinstal.exe"]`。
+
+签名：NotSigned；签名主体：无；证书表offset=0，size=0；overlay offset=None，size=0，比例=0.0000%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|155136|154760|0x60000020|7.4803|
+|.data|0x27000|1024|1996|0xc0000040|1.2485|
+|.rsrc|0x28000|199168|198872|0x40000040|7.4015|
+|.reloc|0x59000|16896|16622|0x42000040|5.7408|
+
+**身份与白标签证据：** 白标签支持中等：Windows IE安装组件结构与版本资源一致，但本机返回NotSigned。 Microsoft Corporation/Internet Explorer Add-on Installer，8.00.7601.17514(win7sp1_rtm.101119-1850)；导入iertutil/urlmon/Wintrust catalog接口，清单Microsoft.Windows.InetCore.ieinstal。
+
+**与恶意PE相似的结构（推断）：** 存在CreateProcessW/OpenProcess/SuspendThread/SetThreadContext/GetThreadContext/ResumeThread/VirtualAlloc/VirtualProtect/FlushInstructionCache，以及RunOnce、Winlogon注册表字符串，模型进程API1、持久化API2、加密API4。.text熵7.4803，.rsrc熵7.4015。安装器权限/COM注册/目录签名功能造成行为特征重叠。
+
+**复核建议：** 优先与对应Win7SP1组件库/目录签名或来源软件包核对哈希。当前文件证书表Size0；本机NotSigned没有给出微软目录签名支持。
+
+## dotFix.exe
+
+路径：`F:\sliverfox-file\safe\dotFix.exe`  
+SHA256：`10bb5d7f37cb261da859676e974ca5287391a88a87c5730f3342b30bfedb64b0`  
+大小：27,416字节；架构：x64；入口RVA：0x2190；OOF fold：3；分组：`safe-filename:dotfix.exe`。
+
+签名：Valid；签名主体：CN="Guangzhou Shirui Electronics Co., Ltd.", O="Guangzhou Shirui Electronics Co., Ltd.", L=Guangzhou, S=Guangdong Province, C=CN；证书表offset=6144，size=21272；overlay offset=6144，size=21272，比例=77.5897%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|512|12|0x60000020|0.1552|
+|.managed|0x2000|512|452|0x60000020|4.5943|
+|.rdata|0x3000|2048|1702|0x40000040|3.3402|
+|.data|0x4000|512|96|0xc0000040|0.3709|
+|.pdata|0x5000|512|120|0x40000040|0.9579|
+|.modules|0x6000|512|8|0x40000040|0.0815|
+|.reloc|0x7000|512|148|0x42000040|1.8529|
+
+**身份与白标签证据：** 白标签支持强：Authenticode Valid，签名主体Guangzhou Shirui Electronics Co., Ltd.；极小业务段及基础输出导入一致。 仅两个导入GetStdHandle/WriteConsoleW；.text实际virtual_size12，.managed452；PDB路径包含ink\Dependencies\EmptyDotFix\dotFix.pdb。无CLR目录，此处.managed只是节名。
+
+**与恶意PE相似的结构（推断）：** 文件27416字节，普通节结束6144；overlay21272字节(77.59%)与证书表offset6144/size21272完全重合。模型overlay_entropy约高熵是签名数据本身，缺版本资源、2个非标准节、极少导入的组合容易与小型加载器重叠。
+
+**复核建议：** 明确的特征建模问题候选：证书表应从overlay负载统计中区分。签名Valid及身份比文件名提供更强白标签支持。
+
+## Dokan.exe
+
+路径：`F:\sliverfox-file\safe\Dokan.exe`  
+SHA256：`3d676ce6e3a12c14f275b03f64d73d49463a0ff946a5f661b603559025e71a84`  
+大小：674,592字节；架构：x86；入口RVA：0x30e2；OOF fold：5；分组：`safe-filename:dokan.exe`。
+
+签名：Valid；签名主体：CN=ISLOG, O=ISLOG, L=Strasbourg, S=Alsace, C=FR；证书表offset=667152，size=7440；overlay offset=35840，size=638752，比例=94.6872%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|24064|24052|0x60000020|6.5096|
+|.rdata|0x7000|5120|4826|0x40000040|5.1005|
+|.data|0x9000|1024|152760|0xc0000040|5.1302|
+|.ndata|0x2f000|0|36864|0xc0000080|0.0000|
+|.rsrc|0x38000|4608|4384|0x40000040|4.3440|
+
+**身份与白标签证据：** 白标签支持强：Authenticode Valid，主体ISLOG，格式为NSIS安装器。 清单Nullsoft.NSIS.exehead/Nullsoft Install System v3.0b1；签名主体ISLOG, Strasbourg, France；导入常规文件释放、GUI、注册表、版本查询与创建进程接口。
+
+**与恶意PE相似的结构（推断）：** overlay638752字节(94.69%)，证书表667152..674592共7440字节；扣除签名仍有631312字节压缩包负载。整体熵7.9818，.ndata空raw非标准节；NSIS安装内容与自解压恶意PE特征重叠。
+
+**复核建议：** 签名/NSIS证据支持白标签；本次未从压缩payload提取Dokan驱动身份，报告产品归属以签名和安装格式为证据。
+
+## TestApp.exe
+
+路径：`F:\sliverfox-file\safe\TestApp.exe`  
+SHA256：`9913225feda352d3662c6a2498ccbe3da39fe0a5abb899f31aa7ea8bfbb99fd4`  
+大小：116,736字节；架构：x86；入口RVA：0x1f00；OOF fold：3；分组：`safe-filename:testapp.exe`。
+
+签名：NotSigned；签名主体：无；证书表offset=0，size=0；overlay offset=None，size=0，比例=0.0000%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|22016|24576|0x60000020|5.8538|
+|.data|0x7000|4608|8192|0xc0000040|3.9123|
+|.tls|0x9000|512|4096|0xc0000040|0.0000|
+|.rdata|0xa000|512|4096|0x50000040|0.2045|
+|.idata|0xb000|28160|28672|0x40000040|5.2884|
+|.edata|0x12000|512|4096|0x40000040|2.1297|
+|.rsrc|0x13000|54784|57344|0x40000040|7.3375|
+|.reloc|0x21000|4096|4096|0x50000040|6.2367|
+
+**身份与白标签证据：** 白标签支持较弱：可确认Embarcadero开发应用和VMProtect授权SDK，产品身份缺失。 导入rtl190.bpl/vcl190.bpl/BORLNDMM.DLL/CC32140MT.DLL，内嵌Embarcadero RAD Studio版权；直接导入VMPROTECTSDK32.DLL的VMProtectGetCurrentHWID/GetSerialNumberData/GetSerialNumberState/SetSerialNumber。
+
+**与恶意PE相似的结构（推断）：** 8节、TLS、.edata及Embarcadero运行库组合，.rsrc熵7.3375且54,784字节；只有FileVersion/ProductVersion1.0.0.0，无公司产品身份，无签名。VMProtect授权SDK表明授权保护用途，不等于已确认压缩壳。
+
+**复核建议：** 8个中值得优先复核来源的一项：SDK/编译器识别支持开发测试程序解释，但缺少可归属产品或签名。没有导入加密/持久化/进程注入API计数。
+
+## e_sqlite3.dll
+
+路径：`F:\sliverfox-file\safe\e_sqlite3.dll`  
+SHA256：`2829b538ee44d1078924f9413334ba61b2834b5e3d802adcf0f1e4985d489fca`  
+大小：1,503,744字节；架构：x64；入口RVA：0x11a17c；OOF fold：4；分组：`safe-filename:e_sqlite3.dll`。
+
+签名：NotSigned；签名主体：无；证书表offset=0，size=0；overlay offset=None，size=0，比例=0.0000%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|1222144|1221824|0x60000020|6.4882|
+|.rdata|0x12c000|193024|192796|0x40000040|5.8474|
+|.data|0x15c000|26112|31280|0xc0000040|3.6556|
+|.pdata|0x164000|55808|55440|0x40000040|6.1197|
+|.fptable|0x172000|512|256|0xc0000040|0.0000|
+|.reloc|0x173000|5120|4960|0x42000040|5.4025|
+
+**身份与白标签证据：** 白标签支持较强：大量一致的SQLite实现字符串和导出支持数据库库身份。 297个导出，包含sqlite3_prepare/bind/backup/blob/aggregate接口；SQL schema迁移、SQLite format 3、sqlite_source_id/sqlite_version等内部实现字符串。唯一导入DLL为Kernel32，共127个API，数据库文件读写、锁、内存映射齐全。
+
+**与恶意PE相似的结构（推断）：** 无资源、无版本、无签名，唯一导入DLL+大量文件写入/删除/锁操作，容易与无版本的独立本地DLL重叠；全文件熵6.5242、RWX0、高熵节0、overlay0，结构不存在明显压缩负载。
+
+**复核建议：** 适合作为无资源的开源本地数据库库误报代表；核对SQLite原始构建包的哈希或sqlite_source_id字符串后保留白标签。
+
+## EasiUpdateSetup.exe
+
+路径：`F:\sliverfox-file\safe\EasiUpdateSetup.exe`  
+SHA256：`89926f3e826ff073cfdfeeefc0d2ebd15c02bfaf2248106933918561728868d1`  
+大小：2,500,161字节；架构：x86；入口RVA：0x3a0a；OOF fold：3；分组：`safe-filename:easiupdatesetup.exe`。
+
+签名：NotSigned；签名主体：无；证书表offset=0，size=0；overlay offset=48128，size=2452033，比例=98.0750%。
+
+|节|RVA|raw大小|virtual大小|权限位|熵|
+|---|---|---:|---:|---|---:|
+|.text|0x1000|31232|30954|0x60000020|6.4958|
+|.rdata|0x9000|12288|12180|0x40000040|4.5811|
+|.data|0xc000|512|425660|0xc0000040|1.6395|
+|.ndata|0x74000|0|724992|0xc0000080|0.0000|
+|.rsrc|0x125000|3072|2960|0x40000040|4.3147|
+
+**身份与白标签证据：** 白标签支持中等偏弱：NSIS和EasiUpdate版本资源一致，但没有公司、原始文件名、签名。 清单Nullsoft.NSIS.exehead/Nullsoft Install System v2.46.5-Unicode；版本资源EasiUpdate 1.1.3.403。
+
+**与恶意PE相似的结构（推断）：** overlay2452033字节(98.08%)、overlay熵7.999806；.ndata空raw、无签名，导入创建进程、文件释放、注册表写入、WININET联网API，符合联网更新安装器，也与下载器/自解压恶意程序重叠。该模型排除了network DLL/API特征，不能把网络API直接写成OOF原因。
+
+**复核建议：** 建议复核发行来源和内嵌压缩内容；现有证据优先解释为更新安装程序，但证据强度低于两个Valid签名样本。
+
+## 跨样本发现
+
+1. dotFix.exe的全部overlay是21,272字节有效签名表，现有overlay统计把证书数据和普通附加载荷合并。Dokan.exe也含7,440字节签名，但其主要高熵overlay确实是NSIS压缩包，二者要分清。
+2. PerfectCalc的UPX、两个NSIS安装器、samplerate高熵数据节覆盖三种不同的高熵来源：壳、压缩包、计算数据。仅把高熵视为恶意倾向会丢失用途区别。
+3. TestApp.exe与EasiUpdateSetup.exe来源证据较弱，适合先复核标签；dotFix/Dokan已有Valid签名，samplerate/SQLite有实质库导出与内部实现证据，适合用来定位模型覆盖不足。
+4. 本组没有动态执行证据；Extortion/SilverFox只是分类器输出，本次结构检查没有提炼出勒索加密或远控行为结论。

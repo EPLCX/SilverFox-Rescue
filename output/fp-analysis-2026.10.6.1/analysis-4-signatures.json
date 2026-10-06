@@ -1,0 +1,74 @@
+[
+  {
+    "path": "F:\\sliverfox-file\\safe\\Updater.dll",
+    "status": "NotSigned",
+    "statusMessage": "The file F:\\sliverfox-file\\safe\\Updater.dll is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "signatureType": "None",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\V9YWjN.exe",
+    "status": "Valid",
+    "statusMessage": "Signature verified.",
+    "signatureType": "Authenticode",
+    "subject": "CN=Tencent Technology (Shenzhen) Company Limited, O=Tencent Technology (Shenzhen) Company Limited, L=Shenzhen, S=Guangdong Province, C=CN",
+    "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+    "thumbprint": "617C4EDB4F205FCA0E5C07B9C52AA8D695FD122C"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\kaspersky4win202121.23.6.614zh-Hans_46411.exe",
+    "status": "Valid",
+    "statusMessage": "Signature verified.",
+    "signatureType": "Authenticode",
+    "subject": "CN=AO Kaspersky Lab, O=AO Kaspersky Lab, STREET=\"sh Leningradskoye, 39A / str 2\", L=Moscow, S=Moscow, C=RU, OID.1.3.6.1.4.1.311.60.2.1.2=Moscow, OID.1.3.6.1.4.1.311.60.2.1.3=RU, SERIALNUMBER=1027739867473, OID.2.5.4.15=Private Organization",
+    "issuer": "CN=GlobalSign GCC R45 EV CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE",
+    "thumbprint": "8F827EFA67BE3F0A9B1F85B2C5F5901CD7392835"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\v2rayN.exe",
+    "status": "NotSigned",
+    "statusMessage": "The file F:\\sliverfox-file\\safe\\v2rayN.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "signatureType": "None",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\360zip.sfx",
+    "status": "NotSigned",
+    "statusMessage": "The file F:\\sliverfox-file\\safe\\360zip.sfx is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "signatureType": "None",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\通用密码登录管理向导.exe",
+    "status": "NotSigned",
+    "statusMessage": "The file F:\\sliverfox-file\\safe\\通用密码登录管理向导.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "signatureType": "None",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\VMProtect.exe",
+    "status": "Valid",
+    "statusMessage": "Signature verified.",
+    "signatureType": "Authenticode",
+    "subject": "E=info@vmpsoft.com, CN=Permyakov Ivan Yurievich IP, O=Permyakov Ivan Yurievich IP, L=Ekaterinburg, S=Sverdlovskaya oblast, C=RU",
+    "issuer": "CN=GlobalSign GCC R45 CodeSigning CA 2020, O=GlobalSign nv-sa, C=BE",
+    "thumbprint": "88BCF3638F5C0129C631975EF7171A475629AA10"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\akshhl.sys",
+    "status": "Valid",
+    "statusMessage": "Signature verified.",
+    "signatureType": "Catalog",
+    "subject": "CN=Microsoft Windows Hardware Compatibility Publisher, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+    "issuer": "CN=Microsoft Windows Hardware Compatibility PCA, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+    "thumbprint": "295911FDA2A12913E405E074ABDCF999C566FF01"
+  }
+]

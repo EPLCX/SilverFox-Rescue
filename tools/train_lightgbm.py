@@ -30,16 +30,20 @@ else:
 
 
 CONFIGS = {
-    "compact": dict(n_estimators=180, learning_rate=0.045, num_leaves=15, max_depth=6,
-                    min_child_samples=5, colsample_bytree=0.80, reg_lambda=4.0),
-    "balanced": dict(n_estimators=260, learning_rate=0.035, num_leaves=23, max_depth=7,
-                     min_child_samples=3, colsample_bytree=0.85, reg_lambda=6.0),
+    "specified": dict(n_estimators=2000, learning_rate=0.03, num_leaves=23, max_depth=-1,
+                       min_child_samples=15, subsample=1.0, subsample_freq=1,
+                       colsample_bytree=0.7, reg_lambda=6.0, min_split_gain=0.0,
+                       random_state=42, n_jobs=-1, deterministic=True, force_row_wise=True),
 }
 
 
-def model(seed: int, config: dict):
-    return lgb.LGBMClassifier(**config, objective="multiclass", subsample=0.9,
-                              subsample_freq=1, verbosity=-1, n_jobs=-1, random_state=seed)
+def model(config: dict):
+    return lgb.LGBMClassifier(**config, objective="multiclass", verbosity=-1)
+
+
+def report_iteration(env):
+    if (env.iteration + 1) % 500 == 0:
+        print(f"iteration {env.iteration + 1}/{env.end_iteration}", flush=True)
 
 
 def probabilities(fitted, x, class_count):
@@ -52,12 +56,12 @@ def probabilities(fitted, x, class_count):
 
 def grouped_oof(x, y, binary, groups, weights, config, seed, class_count):
     values = np.zeros((len(y), class_count), np.float64)
-    splitter = StratifiedGroupKFold(n_splits=2, shuffle=True, random_state=seed)
-    for fold, (train, valid) in enumerate(splitter.split(x, binary, groups), 1):
-        fitted = model(seed + fold, config)
-        fitted.fit(x[train], y[train], sample_weight=weights[train])
+    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+    for fold, (train, valid) in enumerate(splitter.split(x, y, groups), 1):
+        fitted = model(config)
+        fitted.fit(x[train], y[train], sample_weight=weights[train], callbacks=[report_iteration])
         values[valid] = probabilities(fitted, x[valid], class_count)
-        print(f"fold {fold}/2: {len(valid)} validated", flush=True)
+        print(f"fold {fold}/5: {len(valid)} validated", flush=True)
     return values
 
 
@@ -93,6 +97,8 @@ def flatten(booster):
         if "leaf_value" in node:
             values[at] = float(node["leaf_value"])
         else:
+            assert node["decision_type"] == "<=", node["decision_type"]
+            assert node["missing_type"] == "None", node["missing_type"]
             features[at] = int(node["split_feature"])
             thresholds[at] = float(node["threshold"])
             left[at] = visit(node["left_child"])
@@ -106,6 +112,65 @@ def flatten(booster):
             if features[at] >= 0:
                 left[at] -= base; right[at] -= base
     return offsets, left, right, features, thresholds, values
+
+
+def flat_raw(tree, x, k):
+    offsets, left, right, feat, thr, val = map(np.asarray, tree)
+    out = np.zeros((len(x), k), dtype=np.float64)
+    rows = np.arange(len(x))
+    for t, base in enumerate(offsets):
+        nodes = np.full(len(x), base, dtype=np.int64)
+        active = feat[nodes] >= 0
+        while active.any():
+            r = rows[active]
+            n = nodes[active]
+            nodes[active] = base + np.where(x[r, feat[n]] <= thr[n], left[n], right[n])
+            active = feat[nodes] >= 0
+        out[:, t % k] += val[nodes]
+    return out
+
+
+FPR_POINTS = (0.001, 0.0035, 0.005, 0.01)
+
+
+def low_fpr(y, p):
+    # nextafter excludes a tied negative score rather than exceeding the FPR budget.
+    safe = np.sort(p[y == 0])[::-1]
+    result = {}
+    for fpr in FPR_POINTS:
+        allowance = int(len(safe) * fpr)
+        threshold = float(np.nextafter(safe[allowance], np.inf))
+        result[str(fpr)] = point(y, p, threshold)
+    return result
+
+
+def bootstrap_fpr(y, p, groups, seed, iterations=500):
+    unique, inverse = np.unique(groups, return_inverse=True)
+    members = [np.flatnonzero(inverse == i) for i in range(len(unique))]
+    rng = np.random.default_rng(seed)
+    recalls = {str(fpr): [] for fpr in FPR_POINTS}
+    for _ in range(iterations):
+        selected = np.concatenate([members[i] for i in rng.integers(len(unique), size=len(unique))])
+        if len(np.unique(y[selected])) != 2:
+            continue
+        for fpr, metrics in low_fpr(y[selected], p[selected]).items():
+            recalls[fpr].append(metrics["recall"])
+    return {fpr: {"recall_95_ci": np.quantile(values, [0.025, 0.975]).tolist(),
+                  "bootstrap_iterations": len(values), "resampling_unit": "group"}
+            for fpr, values in recalls.items()}
+
+
+def fitted_calibration(binary, raw):
+    raw = np.clip(raw, 1e-7, 1-1e-7)
+    margin = np.log(raw / (1-raw)).reshape(-1, 1)
+    fitted = LogisticRegression(C=1e6, max_iter=500).fit(margin, binary)
+    slope, intercept = float(fitted.coef_[0, 0]), float(fitted.intercept_[0])
+    if slope <= 0:
+        raise RuntimeError("calibration reversed model ranking")
+    p = calibrate(raw, slope, intercept)
+    suspicious = threshold_for(binary, p, 0.005, 0.01)
+    malicious = threshold_for(binary, p, 0.0035, max(suspicious, 0.9))
+    return slope, intercept, p, suspicious, malicious
 
 
 def lines(values, format_value=str, width=10):
@@ -154,7 +219,7 @@ def main():
     parser.add_argument("--booster-out", type=Path, default=MODEL_DIR / "static_ml_booster.txt")
     parser.add_argument("--extra-safe", type=Path, action="append", default=[],
                         help="confirmed safe PE regression sample; may be repeated")
-    parser.add_argument("--seed", type=int, default=20260925)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     samples, skipped = load_samples(args.dataset)
     samples.extend(load_extra_safe(args.extra_safe))
@@ -170,7 +235,7 @@ def main():
     labels = ["Safe" if sample.label == 0 else
               sample.family.split("/", 1)[1] if sample.family.startswith("virus/") else "Generic"
               for sample in samples]
-    x = np.stack([sample.features for sample in samples]).astype(np.float32)
+    x = np.stack([sample.features for sample in samples]).astype(np.float64)
     y = np.asarray([class_index[label] for label in labels], np.int32)
     binary = (y != 0).astype(np.int32)
     groups = np.asarray([sample.group for sample in samples])
@@ -181,45 +246,84 @@ def main():
     weights[focus] *= 2.0
     print(json.dumps({"sample_count": len(y), "classes": dict(zip(classes, map(int, counts))),
                       "virus_pe_samples": int(focus.sum())}, ensure_ascii=False), flush=True)
+    if not np.isfinite(x).all():
+        raise RuntimeError("training features contain NaN or infinity")
+    safe_groups, safe_group_sizes = np.unique(groups[binary == 0], return_counts=True)
+    group_audit = {"safe_samples": int((binary == 0).sum()), "safe_groups": len(safe_groups),
+                   "safe_multi_sample_groups": int((safe_group_sizes > 1).sum()),
+                   "safe_samples_in_multi_sample_groups": int(safe_group_sizes[safe_group_sizes > 1].sum()),
+                   "largest_safe_group": int(safe_group_sizes.max()),
+                   "class_group_counts": {name: len(np.unique(groups[y == i])) for i, name in enumerate(classes)}}
+    print(json.dumps({"group_audit": group_audit}, ensure_ascii=False), flush=True)
     outer = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=args.seed)
-    develop, holdout = next(outer.split(x, binary, groups))
-    if len(set(binary[holdout])) != 2:
-        raise RuntimeError("holdout split must include safe and malicious samples")
-    tuning = []
-    for name, config in CONFIGS.items():
-        print(f"tuning {name}", flush=True)
-        oof = grouped_oof(x[develop], y[develop], binary[develop], groups[develop],
-                          weights[develop], config, args.seed + 10, len(classes))
-        p = 1 - oof[:, 0]
-        threshold = threshold_for(binary[develop], p, 0.005, 0.05)
-        metrics = point(binary[develop], p, threshold)
-        focus_recall = float(np.mean(p[focus[develop]] >= threshold)) if focus[develop].any() else 0.0
-        tuning.append((metrics["recall"] + 0.10*focus_recall, name, config, oof, metrics))
-        print(json.dumps({"candidate": name, "metrics": metrics, "virus_recall": focus_recall}, ensure_ascii=False), flush=True)
-    _, best_name, best_config, dev_oof, _ = max(tuning, key=lambda item: (item[0], -item[4]["false_positive"]))
-    dev_raw = 1 - dev_oof[:, 0]
-    margin = np.log(np.clip(dev_raw, 1e-7, 1-1e-7) / np.clip(1-dev_raw, 1e-7, 1-1e-7)).reshape(-1, 1)
-    calibrator = LogisticRegression(max_iter=500).fit(margin, binary[develop])
-    slope = float(calibrator.coef_[0, 0]); intercept = float(calibrator.intercept_[0])
-    if slope <= 0:
-        raise RuntimeError("calibration reversed model ranking")
-    dev_probability = calibrate(dev_raw, slope, intercept)
-    suspicious = threshold_for(binary[develop], dev_probability, 0.005, 0.01)
-    malicious = threshold_for(binary[develop], dev_probability, 0.0035, max(suspicious, 0.9))
-    provisional = model(args.seed + 100, best_config)
-    provisional.fit(x[develop], y[develop], sample_weight=weights[develop])
-    holdout_classes = probabilities(provisional, x[holdout], len(classes))
-    holdout_raw = 1 - holdout_classes[:, 0]
-    holdout_probability = calibrate(holdout_raw, slope, intercept)
-    final = model(args.seed, best_config)
-    final.fit(x, y, sample_weight=weights)
+    splits = list(outer.split(x, y, groups))
+    # There is one requested configuration: fit it directly, without a tuning loop.
+    best_name, best_config = next(iter(CONFIGS.items()))
+    if len(CONFIGS) != 1:
+        raise RuntimeError("compare configurations using mean recall over FPR_POINTS before selecting one")
+    print("outer evaluation: full grouped 5-fold OOF", flush=True)
+    outer_classes = grouped_oof(x, y, binary, groups, weights, best_config, args.seed, len(classes))
+    fold_ids = np.zeros(len(y), dtype=np.int32)
+    fold_reports = []
+    for fold, (train, valid) in enumerate(splits, 1):
+        if set(groups[train]) & set(groups[valid]):
+            raise RuntimeError("group leaked between train and validation")
+        raw = 1-outer_classes[valid, 0]
+        fold_ids[valid] = fold
+        metrics = {"fold": fold, "train_count": len(train), "valid_count": len(valid),
+                   "train_class_counts": dict(zip(classes, map(int, np.bincount(y[train], minlength=len(classes))))),
+                   "valid_class_counts": dict(zip(classes, map(int, np.bincount(y[valid], minlength=len(classes))))),
+                   "roc_auc": float(roc_auc_score(binary[valid], raw)),
+                   "average_precision": float(average_precision_score(binary[valid], raw)),
+                   "low_fpr": low_fpr(binary[valid], raw)}
+        fold_reports.append(metrics)
+        print(json.dumps(metrics, ensure_ascii=False), flush=True)
+    full_oof_raw = 1-outer_classes[:, 0]
+    slope, intercept, dev_probability, suspicious, malicious = fitted_calibration(binary, full_oof_raw)
+    pooled_low_fpr = low_fpr(binary, full_oof_raw)
+    intervals = bootstrap_fpr(binary, full_oof_raw, groups, args.seed)
+    for fpr in pooled_low_fpr:
+        pooled_low_fpr[fpr].update(intervals[fpr])
+    ablations = {"original": {"pooled_low_fpr": pooled_low_fpr,
+                              "mean_fold_recall": {str(fpr): float(np.mean([v["low_fpr"][str(fpr)]["recall"] for v in fold_reports]))
+                                                   for fpr in FPR_POINTS}}}
+    class_weights = weights.copy()
+    class_weights[focus] /= 2.0
+    no_class_weights = np.ones(len(y), dtype=np.float64)
+    no_class_weights[focus] *= 2.0
+    for name, ablation_weights in (("without_virus_x2", class_weights), ("without_class_weights", no_class_weights)):
+        scores = np.zeros(len(y), dtype=np.float64)
+        fold_scores = []
+        for fold, (train, valid) in enumerate(splits, 1):
+            print(f"ablation {name} fold {fold}/5", flush=True)
+            fitted = model(best_config)
+            fitted.fit(x[train], y[train], sample_weight=ablation_weights[train], callbacks=[report_iteration])
+            scores[valid] = 1-probabilities(fitted, x[valid], len(classes))[:, 0]
+            fold_scores.append(low_fpr(binary[valid], scores[valid]))
+            del fitted
+        ablations[name] = {"pooled_low_fpr": low_fpr(binary, scores),
+                           "mean_fold_recall": {str(fpr): float(np.mean([v[str(fpr)]["recall"] for v in fold_scores]))
+                                                for fpr in FPR_POINTS}}
+        print(json.dumps({"ablation": name, "metrics": ablations[name]}, ensure_ascii=False), flush=True)
+    print("final fit: all eligible samples", flush=True)
+    final = model(best_config)
+    final.fit(x, y, sample_weight=weights, callbacks=[report_iteration])
+    tree = flatten(final.booster_)
+    parity_x = x[:500].copy()
+    reference = final.booster_.predict(parity_x, raw_score=True)
+    parity_error = float(np.abs(flat_raw(tree, parity_x, len(classes))-reference).max())
+    if not np.isfinite(parity_error) or parity_error >= 1e-6:
+        raise RuntimeError(f"flattened tree raw-score mismatch: {parity_error}")
     args.booster_out.parent.mkdir(parents=True, exist_ok=True)
     final.booster_.save_model(str(args.booster_out))
-    tree = flatten(final.booster_)
+    parity_path = args.report.parent / "static_ml_parity_vectors.npz"
+    parity_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(parity_path, x=parity_x, raw_score=reference,
+                        paths=np.asarray([str(sample.path) for sample in samples[:500]]))
     timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     write_header(args.header, tree, classes, suspicious, malicious, slope, intercept, timestamp)
-    predicted_family = holdout_classes[:, 1:].argmax(axis=1) + 1
-    family_holdout = (y[holdout] > 1)
+    predicted_family = outer_classes[:, 1:].argmax(axis=1) + 1
+    named = y > 1
     report = {
         "model": "LightGBM single multiclass GBDT", "trained_at_utc": timestamp,
         "dataset": str(args.dataset), "feature_count": len(FEATURE_NAMES), "feature_names": FEATURE_NAMES,
@@ -227,35 +331,33 @@ def main():
         "class_names": classes, "class_counts": dict(zip(classes, map(int, counts))),
         "sample_count": len(y), "final_fit_count": len(y), "virus_pe_samples": int(focus.sum()),
         "tree_count": len(tree[0]), "node_count": len(tree[3]), "supported_input": "valid_pe_only",
-        "evaluation": "grouped development folds and untouched grouped holdout before final all-sample fit",
-        "selected_config": best_name, "candidate_configs": CONFIGS,
-        "calibration": {"method": "sigmoid_on_development_oof", "slope": slope, "intercept": intercept,
-                        "raw_brier": float(brier_score_loss(binary[develop], dev_raw)),
-                        "calibrated_brier": float(brier_score_loss(binary[develop], dev_probability))},
-        "development_suspicious_operating_point": point(binary[develop], dev_probability, suspicious),
-        "development_malicious_operating_point": point(binary[develop], dev_probability, malicious),
-        "holdout_count": len(holdout),
-        "holdout_roc_auc": float(roc_auc_score(binary[holdout], holdout_probability)),
-        "holdout_average_precision": float(average_precision_score(binary[holdout], holdout_probability)),
-        "holdout_suspicious_operating_point": point(binary[holdout], holdout_probability, suspicious),
-        "holdout_malicious_operating_point": point(binary[holdout], holdout_probability, malicious),
-        "holdout_virus_recall": float(np.mean(holdout_probability[focus[holdout]] >= suspicious)) if focus[holdout].any() else None,
-        "holdout_named_family_accuracy": float(np.mean(predicted_family[family_holdout] == y[holdout][family_holdout])) if family_holdout.any() else None,
+        "evaluation": "grouped 5-fold outer CV of raw scores; final calibration from full 5-fold OOF",
+        "selected_config": best_name, "candidate_configs": CONFIGS, "split_seed": args.seed,
+        "group_audit": group_audit,
+        "calibration": {"method": "sigmoid_on_full_5_fold_oof", "C": 1e6, "slope": slope, "intercept": intercept,
+                        "raw_brier": float(brier_score_loss(binary, full_oof_raw)),
+                        "calibrated_brier": float(brier_score_loss(binary, dev_probability))},
+        "development_suspicious_operating_point": point(binary, dev_probability, suspicious),
+        "development_malicious_operating_point": point(binary, dev_probability, malicious),
+        "outer_cv": {"folds": fold_reports, "roc_auc": float(roc_auc_score(binary, full_oof_raw)),
+                     "average_precision": float(average_precision_score(binary, full_oof_raw)),
+                     "virus_recall_at_fpr_0_005": float((full_oof_raw[focus] >= pooled_low_fpr["0.005"]["threshold"]).mean()),
+                     "named_family_accuracy": float((predicted_family[named] == y[named]).mean()),
+                     "low_fpr": pooled_low_fpr},
+        "weight_ablation": ablations,
+        "flatten_parity": {"checked": len(parity_x), "max_raw_score_error": parity_error, "vectors": str(parity_path)},
         "skipped": skipped, "conflicting_duplicate_groups_removed": conflicts,
         "out_of_fold_samples": [
             {"path": str(samples[i].path), "label": int(binary[i]), "family": samples[i].family,
-             "probability": float(dev_probability[j]), "predicted_family": classes[int(dev_oof[j, 1:].argmax()+1)],
-             "group": samples[i].group, "split": "development"}
-            for j, i in enumerate(develop)] + [
-            {"path": str(samples[i].path), "label": int(binary[i]), "family": samples[i].family,
-             "probability": float(holdout_probability[j]), "predicted_family": classes[int(predicted_family[j])],
-             "group": samples[i].group, "split": "holdout"}
-            for j, i in enumerate(holdout)]}
+             "probability": float(dev_probability[i]), "raw_probability": float(full_oof_raw[i]),
+             "final_calibration_oof_probability": float(dev_probability[i]),
+             "predicted_family": classes[int(predicted_family[i])], "group": samples[i].group,
+             "fold": int(fold_ids[i]), "split": "outer_cv"} for i in range(len(y))]}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({key: report[key] for key in
-                      ("sample_count", "class_counts", "selected_config", "holdout_suspicious_operating_point",
-                       "holdout_virus_recall", "holdout_named_family_accuracy")}, ensure_ascii=False, indent=2), flush=True)
+    print(json.dumps({key: report[key] for key in ("sample_count", "selected_config", "group_audit", "outer_cv", "flatten_parity")},
+                     ensure_ascii=False, indent=2), flush=True)
+
 
 
 if __name__ == "__main__":

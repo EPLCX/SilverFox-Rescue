@@ -1,0 +1,90 @@
+[
+  {
+    "path": "F:\\sliverfox-file\\safe\\samplerate.dll",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\samplerate.dll is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null,
+    "notBefore": null,
+    "notAfter": null,
+    "timestamp": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\PerfectCalc.exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\PerfectCalc.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null,
+    "notBefore": null,
+    "notAfter": null,
+    "timestamp": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\ieinstal (2).exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\ieinstal (2).exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null,
+    "notBefore": null,
+    "notAfter": null,
+    "timestamp": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\dotFix.exe",
+    "status": "Valid",
+    "message": "Signature verified.",
+    "subject": "CN=\"Guangzhou Shirui Electronics Co., Ltd.\", O=\"Guangzhou Shirui Electronics Co., Ltd.\", L=Guangzhou, S=Guangdong Province, C=CN",
+    "issuer": "CN=DigiCert Trusted G4 Code Signing RSA4096 SHA384 2021 CA1, O=\"DigiCert, Inc.\", C=US",
+    "thumbprint": "E9A94FF2F8F07A0B02E43A7163464C688BA69198",
+    "notBefore": "2025-10-20T08:00:00+08:00",
+    "notAfter": "2028-10-16T07:59:59+08:00",
+    "timestamp": "CN=DigiCert SHA256 RSA4096 Timestamp Responder 2026 1, O=\"DigiCert, Inc.\", C=US"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\Dokan.exe",
+    "status": "Valid",
+    "message": "Signature verified.",
+    "subject": "CN=ISLOG, O=ISLOG, L=Strasbourg, S=Alsace, C=FR",
+    "issuer": "SERIALNUMBER=07969287, CN=Go Daddy Secure Certification Authority, OU=http://certificates.godaddy.com/repository, O=\"GoDaddy.com, Inc.\", L=Scottsdale, S=Arizona, C=US",
+    "thumbprint": "3EC93BF943A83427EF6CB7C9CDEC5444750D30A8",
+    "notBefore": "2015-01-30T17:32:38+08:00",
+    "notAfter": "2016-01-30T17:32:38+08:00",
+    "timestamp": "CN=Symantec Time Stamping Services Signer - G4, O=Symantec Corporation, C=US"
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\TestApp.exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\TestApp.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null,
+    "notBefore": null,
+    "notAfter": null,
+    "timestamp": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\e_sqlite3.dll",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\e_sqlite3.dll is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null,
+    "notBefore": null,
+    "notAfter": null,
+    "timestamp": null
+  },
+  {
+    "path": "F:\\sliverfox-file\\safe\\EasiUpdateSetup.exe",
+    "status": "NotSigned",
+    "message": "The file F:\\sliverfox-file\\safe\\EasiUpdateSetup.exe is not digitally signed. You cannot run this script on the current system. For more information about running scripts and setting execution policy, see about_Execution_Policies at https://go.microsoft.com/fwlink/?LinkID=135170",
+    "subject": null,
+    "issuer": null,
+    "thumbprint": null,
+    "notBefore": null,
+    "notAfter": null,
+    "timestamp": null
+  }
+]

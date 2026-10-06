@@ -296,6 +296,20 @@ void pe_metadata(Span data,uint64_t total_len,const Pe &pe,double *v) {
         }else i++;
     }
 }
+bool ml_raw_features(const double *features,size_t count,double *margins,size_t capacity) {
+    if(!features||!margins||count!=silverfox_ml_model::FEATURE_COUNT||capacity<silverfox_ml_model::CLASS_COUNT)return false;
+    for(size_t i=0;i<count;++i)if(!std::isfinite(features[i]))return false;
+    std::fill(margins,margins+silverfox_ml_model::CLASS_COUNT,0.0);
+    for (size_t tree=0;tree<silverfox_ml_model::TREE_COUNT;++tree) {
+        const size_t base=silverfox_ml_model::TREE_OFFSETS[tree];std::int32_t node=0;
+        for (;;) {
+            const size_t at=base+static_cast<size_t>(node);const auto feature=silverfox_ml_model::FEATURES[at];
+            if (feature<0) {margins[tree%silverfox_ml_model::CLASS_COUNT]+=silverfox_ml_model::LEAF_VALUES[at];break;}
+            node=features[static_cast<size_t>(feature)]<=silverfox_ml_model::THRESHOLDS[at]?silverfox_ml_model::LEFT[at]:silverfox_ml_model::RIGHT[at];
+        }
+    }
+    return true;
+}
 struct MlPrediction {double probability;size_t family;};
 MlPrediction ml_predict(Span sample,uint64_t total_len,const Pe &pe,bool valid_pe,const uint32_t *gpu_histogram,size_t gpu_histogram_len) {
     std::array<double,271+MODEL_METADATA_COUNT> features{};
@@ -347,14 +361,7 @@ MlPrediction ml_predict(Span sample,uint64_t total_len,const Pe &pe,bool valid_p
                 features[target++]=metadata[source];
     }
     std::array<double,silverfox_ml_model::CLASS_COUNT> margins{};
-    for (size_t tree=0;tree<silverfox_ml_model::TREE_COUNT;++tree) {
-        const size_t base=silverfox_ml_model::TREE_OFFSETS[tree];std::int32_t node=0;
-        for (;;) {
-            const size_t at=base+static_cast<size_t>(node);const auto feature=silverfox_ml_model::FEATURES[at];
-            if (feature<0) {margins[tree%silverfox_ml_model::CLASS_COUNT]+=silverfox_ml_model::LEAF_VALUES[at];break;}
-            node=features[static_cast<size_t>(feature)]<=silverfox_ml_model::THRESHOLDS[at]?silverfox_ml_model::LEFT[at]:silverfox_ml_model::RIGHT[at];
-        }
-    }
+    if(!ml_raw_features(features.data(),features.size(),margins.data(),margins.size()))return {-1.0,0};
     const double largest=*std::max_element(margins.begin(),margins.end());
     double total=0;for(const auto margin:margins)total+=std::exp(margin-largest);
     const double raw=std::clamp(1.0-std::exp(margins[0]-largest)/total,1e-7,1.0-1e-7);
@@ -407,6 +414,10 @@ void decide(const std::vector<Signal> &raw,SF_Result &out) {
 }
 } // namespace
 
+extern "C" __declspec(dllexport) int __cdecl sf_ml_raw_features(const double *features,size_t count,double *out,size_t capacity) {
+    return ml_raw_features(features,count,out,capacity)?int(silverfox_ml_model::CLASS_COUNT):0;
+}
+
 extern "C" __declspec(dllexport) uint32_t __cdecl sf_engine_abi() {return 3;}
 extern "C" __declspec(dllexport) int __cdecl sf_extract_pe_metadata(const uint8_t *bytes,size_t length,uint64_t total_len,double *out,size_t capacity) {
     if(!bytes||!out||length>256ull*1024*1024||capacity<PE_METADATA_COUNT)return 0;
@@ -429,7 +440,7 @@ extern "C" __declspec(dllexport) double __cdecl sf_ml_probability_context(const 
     (void)path;(void)siblings;
     return ml_probability(sample,total_len,pe,true,nullptr,0);
 }
-extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.4.1";}
+extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.6.1";}
 
 #include "configuration_scan.h"
 
@@ -474,6 +485,7 @@ extern "C" __declspec(dllexport) int __cdecl sf_scan_file(const SF_FileInput *in
         return 1;
     }
     const auto prediction=ml_predict(sample,input->total_len,pe,true,input->gpu_ml_histogram,input->gpu_ml_histogram_len);
+    if(prediction.probability<0)return 0;
     const double probability=prediction.probability;
     const char *family=silverfox_ml_model::CLASS_NAMES[prediction.family];
     const unsigned confidence=static_cast<unsigned>(std::clamp(std::lround(probability*200.0),0L,200L));
