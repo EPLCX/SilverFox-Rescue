@@ -188,6 +188,47 @@ bool parse_pe(Span data,Pe &out) {
 }
 // Keep this extractor shared by training and inference: the Python trainer calls
 // sf_extract_pe_metadata from the compiled engine, so offsets cannot drift.
+struct OverlayInfo { uint64_t start, size; size_t certificate=0, certificate_size=0; };
+OverlayInfo pe_overlay(Span data,uint64_t total_len,const Pe &pe) {
+    OverlayInfo out{pe.raw_end,total_len>pe.raw_end?total_len-pe.raw_end:0};
+    const size_t optional=pe.pe+24, relative=pe.magic==0x20b?112:96;
+    if((pe.magic!=0x10b && pe.magic!=0x20b)||pe.optional_size<relative+40||read32(data,optional+relative-4)<5)return out;
+    const size_t cert=read32(data,optional+relative+32),size=read32(data,optional+relative+36);
+    if(!size||cert%8||cert<pe.raw_end||cert>data.second||size>data.second-cert||uint64_t(cert)+size>total_len)return out;
+    // Validate all WIN_CERTIFICATE records; invalid directory pointers remain overlay.
+    const size_t end=cert+size;
+    for(size_t at=cert;at<end;) {
+        if(end-at<8)return out;
+        const size_t length=read32(data,at);
+        if(length<10||length>end-at||read16(data,at+4)!=0x200||read16(data,at+6)!=2||data.first[at+8]!=0x30)return out;
+        size_t header=2,body=data.first[at+9];
+        if(body&0x80) {
+            const size_t count=body&0x7f;
+            if(!count||count>4||length<10+count)return out;
+            header+=count;body=0;
+            for(size_t i=0;i<count;++i)body=(body<<8)|data.first[at+10+i];
+        }
+        const uint8_t signed_data_oid[]={0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x02};
+        if(header+body>length-8||body<sizeof(signed_data_oid)||std::memcmp(data.first+at+8+header,signed_data_oid,sizeof(signed_data_oid))!=0)return out;
+        for(size_t i=at+8+header+body;i<at+length;++i)if(data.first[i])return out;
+        const size_t aligned=(length+7)&~size_t(7);
+        if(aligned>end-at)return out;
+        for(size_t i=at+length;i<at+aligned;++i)if(data.first[i])return out;
+        at+=aligned;
+    }
+    out.certificate=cert;out.certificate_size=size;out.size-=size;return out;
+}
+std::vector<uint8_t> overlay_sample(Span data,const OverlayInfo &info) {
+    std::vector<uint8_t> bytes;
+    const size_t start=static_cast<size_t>(std::min<uint64_t>(info.start,data.second));
+    const auto append=[&](size_t begin,size_t end) {
+        const size_t length=std::min<size_t>(end-begin,1048576-bytes.size());
+        bytes.insert(bytes.end(),data.first+begin,data.first+begin+length);
+    };
+    if(info.certificate_size){append(start,info.certificate);append(info.certificate+info.certificate_size,data.second);}
+    else append(start,data.second);
+    return bytes;
+}
 constexpr size_t PE_METADATA_COUNT=71;
 constexpr std::array<size_t,15> EXCLUDED_MODEL_METADATA={23,30,33,34,35,47,52,63,64,65,66,67,68,69,70};
 constexpr size_t MODEL_METADATA_COUNT=PE_METADATA_COUNT-EXCLUDED_MODEL_METADATA.size();
@@ -277,9 +318,9 @@ void pe_metadata(Span data,uint64_t total_len,const Pe &pe,double *v) {
             uint32_t id=rd(resource_at+16+i*8);if(!(id&0x80000000u)) {v[40]+=id==16;v[41]+=id==24;v[42]+=id==6;}
         }
     }
-    size_t overlay=pe.raw_end<data.second?size_t(pe.raw_end):data.second;
-    v[43]=std::log1p(double(total_len>pe.raw_end?total_len-pe.raw_end:0));
-    if(overlay<data.second) {Span ov=subspan(data,overlay,std::min<size_t>(data.second-overlay,1048576));v[44]=entropy(ov);size_t printable=0;for(size_t i=0;i<ov.second;i++)printable+=ov.first[i]>=32&&ov.first[i]<=126;v[45]=double(printable)/ov.second;v[46]=starts(ov,"MZ",2)||starts(ov,"PK",2);}
+    const auto overlay=pe_overlay(data,total_len,pe);v[43]=std::log1p(double(overlay.size));
+    const auto tail=overlay_sample(data,overlay);
+    if(!tail.empty()) {Span ov{tail.data(),tail.size()};v[44]=entropy(ov);size_t printable=0;for(size_t i=0;i<ov.second;i++)printable+=ov.first[i]>=32&&ov.first[i]<=126;v[45]=double(printable)/ov.second;v[46]=starts(ov,"MZ",2)||starts(ov,"PK",2);}
     // ASCII/UTF-16LE strings, bounded to the same sample window as inference.
     for(size_t i=0;i<data.second;) {
         bool wide=i+1<data.second && data.first[i]>=32 && data.first[i]<=126 && data.first[i+1]==0;
@@ -351,7 +392,7 @@ MlPrediction ml_predict(Span sample,uint64_t total_len,const Pe &pe,bool valid_p
         size_t executable=0;for (auto &section:pe.sections) executable+=size_t(section.executable);
         features[269]=double(executable)/pe.sections.size();
     }
-    if (valid_pe) features[270]=double(total_len>pe.raw_end?total_len-pe.raw_end:0)/std::max<uint64_t>(total_len,1);
+    if (valid_pe) features[270]=double(pe_overlay(sample,total_len,pe).size)/std::max<uint64_t>(total_len,1);
     if(valid_pe){
         std::array<double,PE_METADATA_COUNT> metadata{};
         pe_metadata(sample,total_len,pe,metadata.data());
@@ -419,6 +460,12 @@ extern "C" __declspec(dllexport) int __cdecl sf_ml_raw_features(const double *fe
 }
 
 extern "C" __declspec(dllexport) uint32_t __cdecl sf_engine_abi() {return 3;}
+extern "C" __declspec(dllexport) int __cdecl sf_pe_overlay_info(const uint8_t *bytes,size_t length,uint64_t total_len,double *out,size_t capacity) {
+    if(!bytes||!out||length>256ull*1024*1024||capacity<4)return 0;
+    Pe pe{};Span sample{bytes,length};if(!parse_pe(sample,pe))return 0;
+    const auto info=pe_overlay(sample,total_len,pe);
+    out[0]=double(info.start);out[1]=double(info.size);out[2]=double(info.certificate);out[3]=double(info.certificate_size);return 4;
+}
 extern "C" __declspec(dllexport) int __cdecl sf_extract_pe_metadata(const uint8_t *bytes,size_t length,uint64_t total_len,double *out,size_t capacity) {
     if(!bytes||!out||length>256ull*1024*1024||capacity<PE_METADATA_COUNT)return 0;
     Pe pe{};Span sample{bytes,length};if(!parse_pe(sample,pe))return 0;
@@ -440,7 +487,7 @@ extern "C" __declspec(dllexport) double __cdecl sf_ml_probability_context(const 
     (void)path;(void)siblings;
     return ml_probability(sample,total_len,pe,true,nullptr,0);
 }
-extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.6.1";}
+extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.7.1";}
 
 #include "configuration_scan.h"
 

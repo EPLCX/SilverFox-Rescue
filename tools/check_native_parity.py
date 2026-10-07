@@ -73,7 +73,9 @@ def main():
                        ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_size_t]
     native.restype = ctypes.c_double
     report = json.loads(args.report.read_text(encoding="utf-8"))
-    rows = report["out_of_fold_samples"]
+    rows = report.get("out_of_fold_samples", report.get("training_samples", []))
+    if not rows:
+        raise RuntimeError("report contains no sample paths for native parity checks")
     selected = rows[::max(1, len(rows)//20)][:20]
     large = next((row for row in rows if Path(row["path"]).stat().st_size > 16 * 1024 * 1024), None)
     if large is not None and large not in selected:
@@ -81,7 +83,7 @@ def main():
     errors = []
     for row in selected:
         path = Path(row["path"])
-        with path.open("rb") as handle: data = handle.read(READ_LIMIT)
+        with path.open("rb") as handle: data = handle.read(min(path.stat().st_size, READ_LIMIT))
         root = Path(report["dataset"]) / row["family"].split("/", 1)[0]
         peers = sibling_names(path, root)
         x = extract_features(data, path.stat().st_size, path, peers)

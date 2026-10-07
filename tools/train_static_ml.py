@@ -98,6 +98,25 @@ FEATURE_NAMES = ([f"byte_frequency_{index:03d}" for index in range(256)] + SCALA
                  + [PE_METADATA_NAMES[index] for index in MODEL_METADATA_INDICES])
 
 _metadata_function = None
+_overlay_function = None
+
+
+def overlay_info(data: bytes, total_size: int) -> tuple[int, int, int, int]:
+    """Raw end, non-certificate tail size, validated certificate offset and size."""
+    global _overlay_function
+    if _overlay_function is None:
+        metadata_function(ENGINE_DLL)
+        function = _metadata_function[0].sf_pe_overlay_info
+        function.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint64,
+                             ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        _overlay_function = function
+    ctypes.pythonapi.PyBytes_AsString.argtypes = [ctypes.py_object]
+    ctypes.pythonapi.PyBytes_AsString.restype = ctypes.POINTER(ctypes.c_uint8)
+    values = (ctypes.c_double * 4)()
+    if _overlay_function(ctypes.pythonapi.PyBytes_AsString(data), len(data), total_size, values, 4) != 4:
+        raise ValueError("native overlay extraction failed")
+    return tuple(int(v) for v in values)
 
 
 def metadata_function(engine: Path):
@@ -121,6 +140,7 @@ class Sample:
     size: int
     group: str
     features: np.ndarray
+    safe_categories: tuple[str, ...] = ()
 
 
 def entropy_from_counts(counts: np.ndarray, length: int) -> float:
@@ -141,18 +161,16 @@ def pe_features(data: bytes, total_size: int) -> tuple[float, float, float, floa
         section_table = pe_offset + 24 + optional_size
         if optional_size > len(data) - pe_offset - 24:
             return 0.0, 0.0, 0.0, 0.0
-        raw_end = 0
         executable = 0
         parsed_sections = 0
         for index in range(min(section_count, 64)):
             at = section_table + index * 40
             if at + 40 > len(data):
                 break
-            raw_size, raw_offset, characteristics = struct.unpack_from("<II12xI", data, at + 16)
-            raw_end = max(raw_end, raw_offset + raw_size)
+            characteristics = struct.unpack_from("<I", data, at + 36)[0]
             executable += int(bool(characteristics & 0x20000000))
             parsed_sections += 1
-        overlay_ratio = max(0, total_size - raw_end) / max(total_size, 1)
+        overlay_ratio = overlay_info(data, total_size)[1] / max(total_size, 1)
         executable_ratio = executable / parsed_sections if parsed_sections else 0.0
         return 1.0, float(parsed_sections), executable_ratio, overlay_ratio
     except (struct.error, ValueError):
@@ -244,7 +262,18 @@ def safe_component_group(data: bytes, path: Path) -> str:
     return "safe-filename:" + name
 
 
-def load_samples(dataset: Path) -> tuple[list[Sample], list[dict[str, object]]]:
+def safe_categories(path: Path, data: bytes, catalog: dict) -> tuple[str, ...]:
+    row = catalog.get(str(path.resolve()).casefold())
+    if row and row.get("sha256") == hashlib.sha256(data).hexdigest():
+        return tuple(row["categories"])
+    if __package__:
+        from .classify_safe_samples import classify
+    else:
+        from classify_safe_samples import classify
+    return tuple(classify(path, data)["categories"])
+
+
+def load_samples(dataset: Path, safe_catalog: dict | None = None) -> tuple[list[Sample], list[dict[str, object]]]:
     definitions = [("safe", 0), ("others-virus", 1), ("virus", 1)]
     samples: list[Sample] = []
     skipped: list[dict[str, object]] = []
@@ -267,7 +296,8 @@ def load_samples(dataset: Path) -> tuple[list[Sample], list[dict[str, object]]]:
                      if path.parent != family_root else f"sample:{source}:{path.relative_to(root)}")
             if source == "safe" and path.parent == root:
                 group = safe_component_group(data, path)
-            return Sample(path, label, family, size, group, features), None
+            categories = safe_categories(path, data, safe_catalog) if label == 0 and safe_catalog is not None else ()
+            return Sample(path, label, family, size, group, features, categories), None
         except (OSError, ValueError) as error:
             return None, {"path": str(path), "reason": f"read_error:{error}"}
     for family, label in definitions:
@@ -293,7 +323,7 @@ def remove_conflicting_duplicates(samples: list[Sample]) -> tuple[list[Sample], 
     return [sample for sample in samples if sample.group not in conflicts], conflicts
 
 
-def load_extra_safe(paths: list[Path]) -> list[Sample]:
+def load_extra_safe(paths: list[Path], safe_catalog: dict | None = None) -> list[Sample]:
     samples = []
     for path in paths:
         if not path.is_file():
@@ -306,7 +336,8 @@ def load_extra_safe(paths: list[Path]) -> list[Sample]:
         features = extract_features(data, size, path, sibling_names(path))
         if features[267] < 0.5:
             raise ValueError(f"extra safe regression file is not a valid PE: {path}")
-        samples.append(Sample(path, 0, "safe-regression", size, f"safe-regression:{path}", features))
+        categories = safe_categories(path, data, safe_catalog) if safe_catalog is not None else ()
+        samples.append(Sample(path, 0, "safe-regression", size, f"safe-regression:{path}", features, categories))
     return samples
 
 
