@@ -99,7 +99,7 @@ const ID_DIRECTORY_CANCEL:usize=391;
 const ID_DIRECTORY_SCAN:usize=392;
 const ID_DIRECTORY_TITLE:usize=393;
 const ID_DIRECTORY_ERROR:usize=395;
-const CLIENT_VERSION:&str="2026.10.5.1";
+const CLIENT_VERSION:&str="2026.10.8.1";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
 // The only terminal page in the scan/remediation flow. It is entered by the
 // remediation worker after all selected items have been processed, never by a
@@ -115,7 +115,7 @@ const WM_STARTUP_CONNECTION_FAILED:u32=WM_APP+0x47;
 const BUTTON_ANIMATION_TIMER:usize=0x5346;
 const BUTTON_ANIMATION_MS:u64=150;
 const PROGRESS_ANIMATION_TIMER:usize=0x5347;
-const SCAN_UPDATE_PRESENTATION:Duration=Duration::from_secs(3);
+const SCAN_UPDATE_PRESENTATION:Duration=Duration::from_secs(1);
 const SINGLE_INSTANCE_NAME:&str="Global\\SilverFoxRescue.MainInstance.202609";
 const ERROR_ALREADY_EXISTS_CODE:u32=183;
 const SYNCHRONIZE_ACCESS:u32=0x0010_0000;
@@ -640,7 +640,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             if let Some(error)=STARTUP_CONNECTION_ERROR.get(){
                 state().allow_close.store(true,Ordering::SeqCst);
                 DestroyWindow(hwnd);
-                MessageBoxW(null_mut(),wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}")).as_ptr(),wide("银狐专杀急救箱 · 更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
+                MessageBoxW(null_mut(),wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}")).as_ptr(),wide("更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
             }
             0
         }
@@ -1967,7 +1967,7 @@ unsafe fn client_height(hwnd:HWND)->i32{let mut rect:RECT=std::mem::zeroed();Get
 fn claim_work() -> bool {
     if FORCED_UPDATE.load(Ordering::Acquire) {
         let (_,version,status)=program_update_state();
-        unsafe{MessageBoxW(null_mut(),wide(&format!("服务器要求先完成强制程序更新 {}。\r\n\r\n当前状态：{}\r\n\r\n请在“程序更新”页面查看进度。",version,status)).as_ptr(),wide("银狐专杀急救箱 · 强制更新").as_ptr(),MB_OK|MB_ICONWARNING);}
+        unsafe{MessageBoxW(null_mut(),wide(&format!("服务器要求先完成强制程序更新 {}。\r\n\r\n当前状态：{}\r\n\r\n请在“程序更新”页面查看进度。",version,status)).as_ptr(),wide("强制更新").as_ptr(),MB_OK|MB_ICONWARNING);}
         return false;
     }
     state().working.compare_exchange(false, true, Ordering:: SeqCst, Ordering:: SeqCst).is_ok()
@@ -2324,7 +2324,7 @@ fn direct_files(directory: &std:: path:: Path) -> std:: io:: Result<Vec<PathBuf>
     #[test] fn quick_scan_uses_expected_system_roots_and_depths(){
         let targets=default_quick_paths();
         let actual:Vec<_>=targets.iter().map(|target|(target.root.to_string_lossy().to_string(),target.max_depth)).collect();
-        assert!(actual.contains(&(r"C:\ProgramData".into(),32)));assert!(actual.contains(&(r"C:\inetpub\wwwroot".into(),32)));assert!(actual.contains(&(r"C:\Windows\Temp".into(),32)));assert!(actual.contains(&(r"C:\Windows\SystemTemp".into(),32)));assert!(actual.contains(&(r"C:\Users\Public".into(),32)));
+        assert!(actual.contains(&(r"C:\ProgramData".into(),4)));assert!(actual.contains(&(r"C:\inetpub\wwwroot".into(),16)));assert!(actual.contains(&(r"C:\Windows\Temp".into(),4)));assert!(actual.contains(&(r"C:\Windows\SystemTemp".into(),4)));assert!(actual.contains(&(r"C:\Users\Public".into(),3)));
     }
 
     #[test] fn quick_scan_user_roots_use_resolved_profile_not_process_environment(){
@@ -2912,13 +2912,13 @@ fn check_program_update_on_startup(hwnd:HWND) {
 
 fn default_quick_paths() -> Vec<ScanTarget> {
     let mut targets=vec![
-        ScanTarget::recursive(r"C:\ProgramData"),
-        ScanTarget::recursive(r"C:\Program Files (x86)"),
+        ScanTarget::new(r"C:\ProgramData",4),
+        ScanTarget::new(r"C:\Program Files (x86)",2),
         ScanTarget::new(r"C:\Program Files",2),
         ScanTarget::recursive(r"C:\Windows\Temp"),
         ScanTarget::recursive(r"C:\Windows\SystemTemp"),
-        ScanTarget::recursive(r"C:\Users\Public"),
-        ScanTarget::recursive(r"C:\inetpub\wwwroot"),
+        ScanTarget::new(r"C:\Users\Public",3),
+        ScanTarget::new(r"C:\inetpub\wwwroot",16),
     ];
     for root in [PathBuf::from(r"C:\Drivers"),PathBuf::from(r"C:\Temp"),PathBuf::from(r"C:\Program Files(x86)")]
         .into_iter().chain(quick_scan::startup_directories()){
@@ -2950,7 +2950,7 @@ fn ensure_elevated() -> bool {
         }
         // A failed UAC handoff must not silently run scanning as a standard user.
         if std::env::args().any(|arg|arg=="--reload") {
-            MessageBoxW(null_mut(),wide("管理员提权未生效，程序已停止启动。").as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);
+            MessageBoxW(null_mut(),wide("管理员提权未生效，程序已停止启动。").as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);
             return false;
         }
         let exe = match std:: env:: current_exe() {
@@ -2963,7 +2963,7 @@ fn ensure_elevated() -> bool {
         // A successful UAC relaunch releases the global mutex in this process.
         // A failed request exits instead of loading the DLL without Administrator rights.
         if (result as isize) <= 32 {
-            MessageBoxW(null_mut(),wide("需要管理员权限才能启动扫描。").as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);
+            MessageBoxW(null_mut(),wide("需要管理员权限才能启动扫描。").as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);
         }
         false
     }
@@ -2981,7 +2981,7 @@ fn main() {
     let signature_diagnostic = args.get(1).map(String::as_str) == Some("--verify-self-signature");
     if let Err(error) = self_signature::verify_current() {
         if signature_diagnostic { eprintln!("程序签名校验失败：{error:#}"); }
-        else { unsafe { MessageBoxW(null_mut(),wide(&format!("程序签名校验失败，已阻止启动：\r\n{error:#}")).as_ptr(),wide("银狐专杀急救箱 · 完整性校验失败").as_ptr(),MB_OK|MB_ICONERROR); } }
+        else { unsafe { MessageBoxW(null_mut(),wide(&format!("程序签名校验失败，已阻止启动：\r\n{error:#}")).as_ptr(),wide("完整性校验失败").as_ptr(),MB_OK|MB_ICONERROR); } }
         std::process::exit(9);
     }
     if signature_diagnostic { println!("程序签名有效"); return; }
@@ -3031,15 +3031,15 @@ fn main() {
         return;
     }
     if let Err(error)=audit::initialize(){
-        unsafe{MessageBoxW(null_mut(),wide(&format!("审计日志初始化失败：{error:#}")).as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{MessageBoxW(null_mut(),wide(&format!("审计日志初始化失败：{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         return;
     }
     if let Err(error)=updater::embedded_engine(){
-        unsafe{MessageBoxW(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error:#}")).as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{MessageBoxW(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         std::process::exit(3);
     }
     if let Err(error)=scanner::Scanner::load(){
-        unsafe{MessageBoxW(null_mut(),wide(&format!("算法 DLL 缺失或验证/加载失败，程序已阻止启动：\r\n{error}")).as_ptr(),wide("银狐专杀急救箱 · 启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{MessageBoxW(null_mut(),wide(&format!("算法 DLL 缺失或验证/加载失败，程序已阻止启动：\r\n{error}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         std::process::exit(3);
     }
     let user_mode_protection = protection:: enable_user_mode_protection();

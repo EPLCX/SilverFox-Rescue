@@ -337,6 +337,397 @@ void pe_metadata(Span data,uint64_t total_len,const Pe &pe,double *v) {
         }else i++;
     }
 }
+// V2 offsets mirror FEATURE_NAMES in tools/train_lightgbm.py.
+namespace silverfox_features {
+constexpr size_t COUNT=657;
+constexpr size_t LEGACY_INDICES[]={256,257,258,259,260,261,262,263,264,265,266,267,268,269,270,272,273,275,276,277,278,279,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326};
+constexpr size_t F_api_anti_debug_checkremotedebuggerpresent=170;
+constexpr size_t F_api_anti_debug_isdebuggerpresent=169;
+constexpr size_t F_api_anti_debug_ntqueryinformationprocess=171;
+constexpr size_t F_api_anti_debug_outputdebugstringa=172;
+constexpr size_t F_api_anti_debug_outputdebugstringw=173;
+constexpr size_t F_api_crypto_bcryptdecrypt=205;
+constexpr size_t F_api_crypto_bcryptencrypt=204;
+constexpr size_t F_api_crypto_cryptacquirecontexta=202;
+constexpr size_t F_api_crypto_cryptacquirecontextw=203;
+constexpr size_t F_api_crypto_cryptdecrypt=201;
+constexpr size_t F_api_crypto_cryptencrypt=200;
+constexpr size_t F_api_injection_createremotethread=160;
+constexpr size_t F_api_injection_ntcreatethreadex=161;
+constexpr size_t F_api_injection_queueuserapc=162;
+constexpr size_t F_api_injection_setthreadcontext=163;
+constexpr size_t F_api_injection_virtualallocex=158;
+constexpr size_t F_api_injection_writeprocessmemory=159;
+constexpr size_t F_api_keyboard_getasynckeystate=166;
+constexpr size_t F_api_keyboard_getkeystate=167;
+constexpr size_t F_api_keyboard_getrawinputdata=168;
+constexpr size_t F_api_keyboard_setwindowshookexa=164;
+constexpr size_t F_api_keyboard_setwindowshookexw=165;
+constexpr size_t F_api_network_connect=184;
+constexpr size_t F_api_network_internetconnecta=176;
+constexpr size_t F_api_network_internetconnectw=177;
+constexpr size_t F_api_network_internetopena=174;
+constexpr size_t F_api_network_internetopenw=175;
+constexpr size_t F_api_network_internetreadfile=178;
+constexpr size_t F_api_network_recv=186;
+constexpr size_t F_api_network_send=185;
+constexpr size_t F_api_network_urldownloadtofilea=179;
+constexpr size_t F_api_network_urldownloadtofilew=180;
+constexpr size_t F_api_network_winhttpconnect=182;
+constexpr size_t F_api_network_winhttpopen=181;
+constexpr size_t F_api_network_winhttpsendrequest=183;
+constexpr size_t F_api_registry_regcreatekeyexa=194;
+constexpr size_t F_api_registry_regcreatekeyexw=195;
+constexpr size_t F_api_registry_regdeletevaluea=198;
+constexpr size_t F_api_registry_regdeletevaluew=199;
+constexpr size_t F_api_registry_regsetvalueexa=196;
+constexpr size_t F_api_registry_regsetvalueexw=197;
+constexpr size_t F_api_service_controlservice=193;
+constexpr size_t F_api_service_createservicea=189;
+constexpr size_t F_api_service_createservicew=190;
+constexpr size_t F_api_service_openscmanagera=187;
+constexpr size_t F_api_service_openscmanagerw=188;
+constexpr size_t F_api_service_startservicea=191;
+constexpr size_t F_api_service_startservicew=192;
+constexpr size_t F_bound_import_count=156;
+constexpr size_t F_byte_entropy_00_00=401;
+constexpr size_t F_chunk_count=99;
+constexpr size_t F_chunk_entropy_p10=100;
+constexpr size_t F_chunk_entropy_p50=101;
+constexpr size_t F_chunk_entropy_p90=102;
+constexpr size_t F_code_size_ratio=131;
+constexpr size_t F_coff_flag_relocs_stripped=214;
+constexpr size_t F_debug_directory_present=137;
+constexpr size_t F_delay_import_count=155;
+constexpr size_t F_dll_flag_high_entropy_va=206;
+constexpr size_t F_e_language_eapi_string=123;
+constexpr size_t F_e_language_krnln_import=122;
+constexpr size_t F_embedded_pe_count=115;
+constexpr size_t F_entry_pre256_entropy=149;
+constexpr size_t F_entry_rva_image_ratio=150;
+constexpr size_t F_entry_section_entropy=141;
+constexpr size_t F_entry_section_is_last=142;
+constexpr size_t F_entry_section_name_standard=143;
+constexpr size_t F_entry_section_relative_offset=152;
+constexpr size_t F_headers_size_anomalous=134;
+constexpr size_t F_image_file_ratio=151;
+constexpr size_t F_import_api_hash_000=241;
+constexpr size_t F_import_dll_hash_00=369;
+constexpr size_t F_import_minimal_flag=154;
+constexpr size_t F_import_ordinal_ratio=157;
+constexpr size_t F_initialized_data_size_ratio=132;
+constexpr size_t F_linker_major=125;
+constexpr size_t F_linker_minor=126;
+constexpr size_t F_load_config_present=140;
+constexpr size_t F_max_byte_ratio=82;
+constexpr size_t F_max_byte_value=83;
+constexpr size_t F_nz_chunk_entropy_max=95;
+constexpr size_t F_nz_chunk_entropy_mean=92;
+constexpr size_t F_nz_chunk_entropy_min=94;
+constexpr size_t F_nz_chunk_entropy_std=93;
+constexpr size_t F_nz_count_log1p=85;
+constexpr size_t F_nz_entropy=91;
+constexpr size_t F_nz_high_bit_ratio=97;
+constexpr size_t F_nz_printable_ratio=96;
+constexpr size_t F_nz_unique_byte_ratio=98;
+constexpr size_t F_os_major=127;
+constexpr size_t F_os_minor=128;
+constexpr size_t F_overlay_embedded_pe_count=113;
+constexpr size_t F_overlay_magic_7z=109;
+constexpr size_t F_overlay_magic_inno=112;
+constexpr size_t F_overlay_magic_nsis=111;
+constexpr size_t F_overlay_magic_rar=110;
+constexpr size_t F_overlay_magic_zip=108;
+constexpr size_t F_packer_aspack=121;
+constexpr size_t F_packer_mpress=120;
+constexpr size_t F_packer_themida=119;
+constexpr size_t F_packer_upx_magic=117;
+constexpr size_t F_packer_upx_section=116;
+constexpr size_t F_packer_vmprotect_section=118;
+constexpr size_t F_pdb_path_present=138;
+constexpr size_t F_relocations_present=139;
+constexpr size_t F_resource_embedded_pe_count=114;
+constexpr size_t F_resource_embedded_pe_header=105;
+constexpr size_t F_resource_icon_count=106;
+constexpr size_t F_resource_language_id_count=107;
+constexpr size_t F_resource_max_entropy=104;
+constexpr size_t F_resource_total_size_ratio=103;
+constexpr size_t F_rich_hash_00=225;
+constexpr size_t F_rich_header_present=124;
+constexpr size_t F_section_entropy_max=146;
+constexpr size_t F_section_entropy_min=147;
+constexpr size_t F_section_entropy_weighted_mean=148;
+constexpr size_t F_section_raw_virtual_ratio_max=144;
+constexpr size_t F_section_raw_virtual_ratio_min=145;
+constexpr size_t F_subsystem_major=129;
+constexpr size_t F_subsystem_minor=130;
+constexpr size_t F_timestamp_before_1995=153;
+constexpr size_t F_tls_callback_count=136;
+constexpr size_t F_tls_present=135;
+constexpr size_t F_top_run_byte_ratio=84;
+constexpr size_t F_uninitialized_data_size_ratio=133;
+constexpr size_t F_zero_chunk_ratio=88;
+constexpr size_t F_zero_in_long_runs_ratio=87;
+constexpr size_t F_zero_ratio_overlay=89;
+constexpr size_t F_zero_ratio_sections=90;
+constexpr size_t F_zero_run_max_ratio=86;
+}
+// Extended static features share the layout defined in tools/train_lightgbm.py.
+namespace extended_ml {
+using namespace silverfox_features;
+void apply_api_flags(const std::set<std::string> &apis,double *out) {
+    out[F_api_injection_virtualallocex]=apis.count("virtualallocex")!=0;
+    out[F_api_injection_writeprocessmemory]=apis.count("writeprocessmemory")!=0;
+    out[F_api_injection_createremotethread]=apis.count("createremotethread")!=0;
+    out[F_api_injection_ntcreatethreadex]=apis.count("ntcreatethreadex")!=0;
+    out[F_api_injection_queueuserapc]=apis.count("queueuserapc")!=0;
+    out[F_api_injection_setthreadcontext]=apis.count("setthreadcontext")!=0;
+    out[F_api_keyboard_setwindowshookexa]=apis.count("setwindowshookexa")!=0;
+    out[F_api_keyboard_setwindowshookexw]=apis.count("setwindowshookexw")!=0;
+    out[F_api_keyboard_getasynckeystate]=apis.count("getasynckeystate")!=0;
+    out[F_api_keyboard_getkeystate]=apis.count("getkeystate")!=0;
+    out[F_api_keyboard_getrawinputdata]=apis.count("getrawinputdata")!=0;
+    out[F_api_anti_debug_isdebuggerpresent]=apis.count("isdebuggerpresent")!=0;
+    out[F_api_anti_debug_checkremotedebuggerpresent]=apis.count("checkremotedebuggerpresent")!=0;
+    out[F_api_anti_debug_ntqueryinformationprocess]=apis.count("ntqueryinformationprocess")!=0;
+    out[F_api_anti_debug_outputdebugstringa]=apis.count("outputdebugstringa")!=0;
+    out[F_api_anti_debug_outputdebugstringw]=apis.count("outputdebugstringw")!=0;
+    out[F_api_network_internetopena]=apis.count("internetopena")!=0;
+    out[F_api_network_internetopenw]=apis.count("internetopenw")!=0;
+    out[F_api_network_internetconnecta]=apis.count("internetconnecta")!=0;
+    out[F_api_network_internetconnectw]=apis.count("internetconnectw")!=0;
+    out[F_api_network_internetreadfile]=apis.count("internetreadfile")!=0;
+    out[F_api_network_urldownloadtofilea]=apis.count("urldownloadtofilea")!=0;
+    out[F_api_network_urldownloadtofilew]=apis.count("urldownloadtofilew")!=0;
+    out[F_api_network_winhttpopen]=apis.count("winhttpopen")!=0;
+    out[F_api_network_winhttpconnect]=apis.count("winhttpconnect")!=0;
+    out[F_api_network_winhttpsendrequest]=apis.count("winhttpsendrequest")!=0;
+    out[F_api_network_connect]=apis.count("connect")!=0;
+    out[F_api_network_send]=apis.count("send")!=0;
+    out[F_api_network_recv]=apis.count("recv")!=0;
+    out[F_api_service_openscmanagera]=apis.count("openscmanagera")!=0;
+    out[F_api_service_openscmanagerw]=apis.count("openscmanagerw")!=0;
+    out[F_api_service_createservicea]=apis.count("createservicea")!=0;
+    out[F_api_service_createservicew]=apis.count("createservicew")!=0;
+    out[F_api_service_startservicea]=apis.count("startservicea")!=0;
+    out[F_api_service_startservicew]=apis.count("startservicew")!=0;
+    out[F_api_service_controlservice]=apis.count("controlservice")!=0;
+    out[F_api_registry_regcreatekeyexa]=apis.count("regcreatekeyexa")!=0;
+    out[F_api_registry_regcreatekeyexw]=apis.count("regcreatekeyexw")!=0;
+    out[F_api_registry_regsetvalueexa]=apis.count("regsetvalueexa")!=0;
+    out[F_api_registry_regsetvalueexw]=apis.count("regsetvalueexw")!=0;
+    out[F_api_registry_regdeletevaluea]=apis.count("regdeletevaluea")!=0;
+    out[F_api_registry_regdeletevaluew]=apis.count("regdeletevaluew")!=0;
+    out[F_api_crypto_cryptencrypt]=apis.count("cryptencrypt")!=0;
+    out[F_api_crypto_cryptdecrypt]=apis.count("cryptdecrypt")!=0;
+    out[F_api_crypto_cryptacquirecontexta]=apis.count("cryptacquirecontexta")!=0;
+    out[F_api_crypto_cryptacquirecontextw]=apis.count("cryptacquirecontextw")!=0;
+    out[F_api_crypto_bcryptencrypt]=apis.count("bcryptencrypt")!=0;
+    out[F_api_crypto_bcryptdecrypt]=apis.count("bcryptdecrypt")!=0;
+}
+double count_entropy(const std::array<size_t,256> &counts,size_t length) {
+    double value=0;if(!length)return value;
+    for(const auto count:counts)if(count){const double p=double(count)/length;value-=p*std::log2(p);}return value;
+}
+bool magic(Span data,const char *needle,size_t length) {
+    const auto first=reinterpret_cast<const uint8_t *>(needle);
+    return length<=data.second && std::search(data.first,data.first+data.second,first,first+length)!=data.first+data.second;
+}
+size_t embedded_count(Span data) {
+    size_t count=0;
+    for(size_t i=0;i+64<=data.second;++i)if(data.first[i]=='M'&&data.first[i+1]=='Z'){
+        const auto offset=read32(data,i+60);
+        if(offset>=64&&offset<1048576&&offset<=data.second-i&&data.second-i-offset>=24&&read32(data,i+offset)==0x4550)++count;
+    }return count;
+}
+uint32_t hash_bytes(const uint8_t *bytes,size_t length) {
+    uint32_t value=2166136261u;for(size_t i=0;i<length;++i)value=(value^bytes[i])*16777619u;return value;
+}
+uint32_t hash_name(const std::string &name){return hash_bytes(reinterpret_cast<const uint8_t *>(name.data()),name.size());}
+double quantile(const std::vector<double> &sorted,double q) {
+    if(sorted.empty())return 0;const double position=q*(sorted.size()-1);const auto at=static_cast<size_t>(position);
+    return sorted[at]+(sorted[std::min(at+1,sorted.size()-1)]-sorted[at])*(position-at);
+}
+void bytes(Span data,uint64_t total,double *out) {
+    std::array<size_t,256> counts{},chunk{};std::vector<double> entropies,nz_entropies;
+    size_t run=0,long_runs=0,zero_max=0,zero_long=0,zero_chunks=0;uint8_t previous=0;
+    auto finish_run=[&]{if(run>=256){long_runs+=run;if(previous==0)zero_long+=run;}if(previous==0)zero_max=std::max(zero_max,run);};
+    for(size_t i=0;i<data.second;++i){
+        const auto b=data.first[i];++counts[b];++chunk[b];
+        if(!run){previous=b;run=1;}else if(previous==b){++run;}else{finish_run();previous=b;run=1;}
+        if((i+1)%65536==0||i+1==data.second){
+            const size_t length=(i%65536)+1;entropies.push_back(count_entropy(chunk,length));
+            if(length==65536&&chunk[0]==length)++zero_chunks;
+            const size_t nz=length-chunk[0];chunk[0]=0;if(nz)nz_entropies.push_back(count_entropy(chunk,nz));chunk.fill(0);
+        }
+    }finish_run();
+    const double n=double(std::max<size_t>(data.second,1)),file=double(std::max<uint64_t>(total,1));
+    size_t dominant=0;for(size_t i=1;i<256;++i)if(counts[i]>counts[dominant])dominant=i;
+    out[F_max_byte_value]=double(dominant);out[F_max_byte_ratio]=counts[dominant]/n;
+    out[F_top_run_byte_ratio]=long_runs/file;out[F_zero_run_max_ratio]=zero_max/file;
+    out[F_zero_in_long_runs_ratio]=double(zero_long)/std::max<size_t>(counts[0],1);
+    out[F_zero_chunk_ratio]=double(zero_chunks)/std::max<size_t>(data.second/65536,1);
+    out[F_chunk_count]=double(entropies.size());std::sort(entropies.begin(),entropies.end());
+    out[F_chunk_entropy_p10]=quantile(entropies,.1);out[F_chunk_entropy_p50]=quantile(entropies,.5);out[F_chunk_entropy_p90]=quantile(entropies,.9);
+    for(size_t i=0;i<256;++i)out[i/16]+=counts[i]/n;
+    const size_t nz=data.second-counts[0];out[F_nz_count_log1p]=std::log1p(double(nz));counts[0]=0;
+    out[F_nz_entropy]=count_entropy(counts,nz);size_t printable=counts[9]+counts[10]+counts[13],high=0,unique=0;
+    for(size_t i=0;i<256;++i){if(i>=32&&i<=126)printable+=counts[i];if(i>=128)high+=counts[i];unique+=counts[i]!=0;}
+    out[F_nz_printable_ratio]=double(printable)/std::max<size_t>(nz,1);out[F_nz_high_bit_ratio]=double(high)/std::max<size_t>(nz,1);out[F_nz_unique_byte_ratio]=double(unique)/256;
+    if(!nz_entropies.empty()){
+        double sum=0;for(const auto e:nz_entropies)sum+=e;const double mean=sum/nz_entropies.size();double variance=0;
+        for(const auto e:nz_entropies)variance+=(e-mean)*(e-mean);
+        out[F_nz_chunk_entropy_mean]=mean;out[F_nz_chunk_entropy_std]=std::sqrt(variance/nz_entropies.size());
+        out[F_nz_chunk_entropy_min]=*std::min_element(nz_entropies.begin(),nz_entropies.end());out[F_nz_chunk_entropy_max]=*std::max_element(nz_entropies.begin(),nz_entropies.end());
+    }
+    std::array<size_t,16> nibble{};const size_t first=std::min<size_t>(2048,data.second);
+    for(size_t i=0;i<first;++i)++nibble[data.first[i]>>4];double histogram_total=0;
+    auto window=[&]{
+        double e=0;for(const auto count:nibble)if(count){const double p=double(count)/2048;e-=p*std::log2(p);}
+        const size_t bin=std::min<size_t>(15,static_cast<size_t>(e*4));
+        for(size_t i=0;i<16;++i){out[F_byte_entropy_00_00+bin*16+i]+=double(nibble[i]);histogram_total+=double(nibble[i]);}
+    };
+    if(first)window();
+    for(size_t at=1024;at+2048<=data.second;at+=1024){
+        for(size_t i=at-1024;i<at;++i)--nibble[data.first[i]>>4];
+        for(size_t i=at+1024;i<at+2048;++i)++nibble[data.first[i]>>4];window();
+    }
+    if(histogram_total)for(size_t i=0;i<256;++i)out[F_byte_entropy_00_00+i]/=histogram_total;
+}
+struct View {
+    Span data;const Pe &pe;size_t optional;
+    uint64_t read(size_t at,size_t width=4)const {
+        if(at>data.second||width>data.second-at)return 0;uint64_t value=0;for(size_t i=0;i<width;++i)value|=uint64_t(data.first[at+i])<<(i*8);return value;
+    }
+    std::pair<uint32_t,uint32_t> directory(size_t index)const {
+        const size_t relative=pe.magic==0x20b?112:96;
+        if((pe.magic!=0x10b&&pe.magic!=0x20b)||relative+index*8+8>pe.optional_size||index>=read(optional+relative-4))return {0,0};
+        return {static_cast<uint32_t>(read(optional+relative+index*8)),static_cast<uint32_t>(read(optional+relative+index*8+4))};
+    }
+    size_t map(uint64_t rva)const {
+        for(const auto &s:pe.sections)if(rva>=s.va&&rva<uint64_t(s.va)+s.virtual_size&&rva-s.va<s.size&&uint64_t(s.offset)+rva-s.va<data.second)return s.offset+static_cast<size_t>(rva-s.va);
+        return rva<read(optional+60)&&rva<data.second?static_cast<size_t>(rva):SIZE_MAX;
+    }
+    std::string string(size_t at,size_t limit=256)const {
+        if(at>=data.second)return {};size_t length=0;while(length<limit&&length<data.second-at&&data.first[at+length])++length;
+        return std::string(reinterpret_cast<const char *>(data.first+at),length);
+    }
+};
+void pe_features(Span data,uint64_t total,const Pe &pe,double *out) {
+    View v{data,pe,pe.pe+24};const auto o=v.optional;const double file=double(std::max<uint64_t>(total,1));
+    const auto overlay=pe_overlay(data,total,pe);std::vector<Span> parts;
+    if(overlay.certificate_size){parts.push_back(subspan(data,static_cast<size_t>(overlay.start),overlay.certificate-static_cast<size_t>(overlay.start)));parts.push_back(subspan(data,overlay.certificate+overlay.certificate_size,data.second));}
+    else parts.push_back(subspan(data,static_cast<size_t>(overlay.start),data.second));
+    size_t overlay_zero=0,overlay_length=0;
+    for(const auto part:parts){
+        overlay_length+=part.second;overlay_zero+=std::count(part.first,part.first+part.second,uint8_t(0));out[F_overlay_embedded_pe_count]+=double(embedded_count(part));
+        out[F_overlay_magic_zip]=std::max(out[F_overlay_magic_zip],double(magic(part,"PK\x03\x04",4)||magic(part,"PK\x05\x06",4)||magic(part,"PK\x07\x08",4)));
+        out[F_overlay_magic_7z]=std::max(out[F_overlay_magic_7z],double(magic(part,"7z\xbc\xaf\x27\x1c",6)));
+        out[F_overlay_magic_rar]=std::max(out[F_overlay_magic_rar],double(magic(part,"Rar!\x1a\x07\x00",7)||magic(part,"Rar!\x1a\x07\x01\x00",8)));
+        out[F_overlay_magic_nsis]=std::max(out[F_overlay_magic_nsis],double(magic(part,"NullsoftInst",12)));
+        out[F_overlay_magic_inno]=std::max(out[F_overlay_magic_inno],double(magic(part,"Inno Setup Setup Data",21)||magic(part,"Inno Setup Messages",19)));
+    }
+    out[F_zero_ratio_overlay]=double(overlay_zero)/std::max<size_t>(overlay_length,1);
+    out[F_embedded_pe_count]=double(embedded_count(data));if(out[F_embedded_pe_count]>0)--out[F_embedded_pe_count];
+    out[F_packer_upx_magic]=magic(data,"UPX!",4);out[F_packer_themida]=magic(data,"Themida",7)||magic(data,"THEMIDA",7);
+    out[F_packer_mpress]=magic(data,"MPRESS",6);out[F_packer_aspack]=magic(data,"ASPack",6);
+    out[F_e_language_eapi_string]=magic(data,"eAPI",4)||magic(data,"EAPI",4);
+    const std::set<std::string> standard={".text",".data",".rdata",".rsrc",".reloc",".bss",".idata",".edata",".tls",".pdata",".xdata",".debug"};
+    size_t section_length=0,section_zero=0;double weighted=0;const uint64_t entry=v.read(o+16),image=v.read(o+56);bool entry_found=false;
+    for(size_t i=0;i<pe.sections.size();++i){
+        const auto &s=pe.sections[i];const auto name=lower(s.name);const auto block=subspan(data,s.offset,s.size);const double e=entropy(block);
+        const auto declared_virtual=v.read(o+pe.optional_size+i*40+8);const double ratio=double(s.size)/std::max<uint64_t>(declared_virtual,1);
+        section_length+=block.second;section_zero+=std::count(block.first,block.first+block.second,uint8_t(0));weighted+=e*block.second;
+        if(i==0){out[F_section_entropy_min]=e;out[F_section_raw_virtual_ratio_min]=ratio;}
+        out[F_section_entropy_max]=std::max(out[F_section_entropy_max],e);out[F_section_entropy_min]=std::min(out[F_section_entropy_min],e);
+        out[F_section_raw_virtual_ratio_max]=std::max(out[F_section_raw_virtual_ratio_max],ratio);out[F_section_raw_virtual_ratio_min]=std::min(out[F_section_raw_virtual_ratio_min],ratio);
+        if(name.rfind("upx",0)==0)out[F_packer_upx_section]=1;if(name==".vmp0"||name==".vmp1"||name==".vmp2")out[F_packer_vmprotect_section]=1;
+        if(name==".themida")out[F_packer_themida]=1;if(name.rfind(".mpress",0)==0)out[F_packer_mpress]=1;if(name==".aspack"||name==".adata")out[F_packer_aspack]=1;
+        if(!entry_found&&entry>=s.va&&entry<uint64_t(s.va)+s.virtual_size){
+            entry_found=true;out[F_entry_section_entropy]=e;out[F_entry_section_is_last]=i+1==pe.sections.size();out[F_entry_section_name_standard]=standard.count(name)!=0;
+            out[F_entry_section_relative_offset]=double(entry-s.va)/std::max<uint32_t>(s.virtual_size,1);
+            const auto at=v.map(entry);if(at!=SIZE_MAX){const auto start=std::max<size_t>(s.offset,at>256?at-256:0);out[F_entry_pre256_entropy]=entropy(subspan(data,start,at-start));}
+        }
+    }
+    out[F_zero_ratio_sections]=double(section_zero)/std::max<size_t>(section_length,1);out[F_section_entropy_weighted_mean]=weighted/std::max<size_t>(section_length,1);
+    out[F_linker_major]=double(v.read(o+2,1));out[F_linker_minor]=double(v.read(o+3,1));out[F_os_major]=double(v.read(o+40,2));out[F_os_minor]=double(v.read(o+42,2));
+    out[F_subsystem_major]=double(v.read(o+48,2));out[F_subsystem_minor]=double(v.read(o+50,2));
+    out[F_code_size_ratio]=v.read(o+4)/file;out[F_initialized_data_size_ratio]=v.read(o+8)/file;out[F_uninitialized_data_size_ratio]=v.read(o+12)/file;
+    const auto headers=v.read(o+60),alignment=v.read(o+36);
+    out[F_headers_size_anomalous]=headers<o+pe.optional_size+v.read(pe.pe+6,2)*40||headers>total||!alignment||headers%alignment!=0;
+    out[F_entry_rva_image_ratio]=double(entry)/std::max<uint64_t>(image,1);out[F_image_file_ratio]=image/file;
+    const auto stamp=v.read(pe.pe+8);out[F_timestamp_before_1995]=stamp>0&&stamp<788918400;
+    const auto tls_dir=v.directory(9),debug_dir=v.directory(6),reloc_dir=v.directory(5),config_dir=v.directory(10);
+    out[F_tls_present]=tls_dir.first&&tls_dir.second;out[F_debug_directory_present]=debug_dir.first&&debug_dir.second;
+    out[F_relocations_present]=reloc_dir.first&&reloc_dir.second;out[F_load_config_present]=config_dir.first&&config_dir.second;
+    const size_t width=pe.magic==0x20b?8:4;const auto imagebase=v.read(o+(width==8?24:28),width);
+    const auto tls=tls_dir.first?v.map(tls_dir.first):SIZE_MAX;
+    if(tls!=SIZE_MAX){const auto address=v.read(tls+(width==8?24:12),width);const auto at=address>=imagebase?v.map(address-imagebase):SIZE_MAX;
+        for(size_t i=0;at!=SIZE_MAX&&i<4096&&at<=data.second&&i*width+width<=data.second-at&&v.read(at+i*width,width);++i)++out[F_tls_callback_count];}
+    const auto debug=debug_dir.first?v.map(debug_dir.first):SIZE_MAX;
+    for(size_t i=0;debug!=SIZE_MAX&&i<std::min<size_t>(debug_dir.second/28,4096)&&debug<=data.second&&i*28+28<=data.second-debug;++i){
+        const auto at=debug+i*28;if(v.read(at+12)!=2)continue;const auto q=static_cast<size_t>(v.read(at+24)),length=static_cast<size_t>(v.read(at+16));
+        const auto sig=subspan(data,q,4);const size_t skip=starts(sig,"RSDS",4)?24:starts(sig,"NB10",4)?16:0;
+        if(skip&&length>skip&&q<=data.second&&length<=data.second-q&&!v.string(q+skip,std::min<size_t>(length-skip,4096)).empty())out[F_pdb_path_present]=1;
+    }
+    size_t rich=SIZE_MAX;for(size_t i=0;i+4<=pe.pe&&i+4<=data.second;++i)if(read32(data,i)==0x68636952)rich=i;
+    if(rich!=SIZE_MAX&&rich+8<=pe.pe){const auto key=read32(data,rich+4);size_t start=rich>=4?rich-4:0;
+        while(start>=64&&(read32(data,start)^key)!=0x536e6144)start-=4;
+        if(start>=64&&start+16<=rich){out[F_rich_header_present]=1;for(size_t i=start+16;i+8<=rich;i+=8){const uint32_t id=read32(data,i)^key;const uint8_t b[]={uint8_t(id),uint8_t(id>>8),uint8_t(id>>16),uint8_t(id>>24)};out[F_rich_hash_00+hash_bytes(b,4)%16]=1;}}
+    }
+    // Independent bits replace ordinal treatment of the two characteristic masks.
+    const uint16_t dll_flags=static_cast<uint16_t>(v.read(o+70,2)),coff_flags=static_cast<uint16_t>(v.read(pe.pe+22,2));
+    const unsigned dll_bits[]={0x20,0x40,0x80,0x100,0x400,0x1000,0x4000,0x8000};
+    const unsigned coff_bits[]={1,2,4,8,0x20,0x100,0x200,0x400,0x800,0x1000,0x2000};
+    for(size_t i=0;i<8;++i)out[F_dll_flag_high_entropy_va+i]=(dll_flags&dll_bits[i])!=0;
+    for(size_t i=0;i<11;++i)out[F_coff_flag_relocs_stripped+i]=(coff_flags&coff_bits[i])!=0;
+    std::set<std::string> apis,dlls;size_t total_imports=0,ordinals=0;
+    for(const size_t index:{size_t(1),size_t(13)}){
+        const auto dir=v.directory(index);const auto at=dir.first?v.map(dir.first):SIZE_MAX;const size_t step=index==1?20:32;
+        const size_t limit=std::min<size_t>(512,dir.second?dir.second/step:512);
+        for(size_t i=0;at!=SIZE_MAX&&i<limit&&at<=data.second&&i*step+step<=data.second-at;++i){
+            const size_t d=at+i*step;if(std::all_of(data.first+d,data.first+d+step,[](uint8_t b){return !b;}))break;
+            uint64_t name=v.read(d+(index==1?12:4)),thunk=index==1?(v.read(d)?v.read(d):v.read(d+16)):(v.read(d+16)?v.read(d+16):v.read(d+12));
+            if(index==13&&!(v.read(d)&1)){name=name>=imagebase?name-imagebase:UINT64_MAX;thunk=thunk>=imagebase?thunk-imagebase:UINT64_MAX;}
+            dlls.insert(lower(v.string(v.map(name),260)));const auto q=v.map(thunk);
+            for(size_t j=0;q!=SIZE_MAX&&j<1024&&q<=data.second&&j*width+width<=data.second-q;++j){
+                const auto value=v.read(q+j*width,width);if(!value)break;++total_imports;if(index==13)++out[F_delay_import_count];
+                if(value&(uint64_t(1)<<(width*8-1))){++ordinals;continue;}const auto n=v.map(uint32_t(value));if(n!=SIZE_MAX)apis.insert(lower(v.string(n+2,254)));
+            }
+        }
+    }
+    out[F_import_ordinal_ratio]=double(ordinals)/std::max<size_t>(total_imports,1);
+    const std::set<std::string> minimal={"getprocaddress","loadlibrarya","loadlibraryw","loadlibraryexa","loadlibraryexw"};
+    out[F_import_minimal_flag]=!apis.empty()&&!ordinals&&apis.count("getprocaddress")&&apis.size()>1&&std::all_of(apis.begin(),apis.end(),[&](const std::string &a){return minimal.count(a)!=0;});
+    for(const auto &name:apis)out[F_import_api_hash_000+hash_name(name)%128]=1;
+    for(const auto &name:dlls){if(!name.empty())out[F_import_dll_hash_00+hash_name(name)%32]=1;if(name.find("krnln")!=std::string::npos)out[F_e_language_krnln_import]=1;}
+    apply_api_flags(apis,out);
+    const auto bound_dir=v.directory(11);size_t bound=bound_dir.first?v.map(bound_dir.first):SIZE_MAX;
+    const auto bound_end=bound!=SIZE_MAX?std::min<uint64_t>(data.second,uint64_t(bound)+bound_dir.second):0;
+    while(bound!=SIZE_MAX&&bound+8<=bound_end&&!std::all_of(data.first+bound,data.first+bound+8,[](uint8_t b){return !b;})){++out[F_bound_import_count];bound+=8*(1+v.read(bound+6,2));}
+    const auto resource_dir=v.directory(2);const auto base=resource_dir.first?v.map(resource_dir.first):SIZE_MAX;
+    std::set<std::pair<size_t,size_t>> visited,resources;std::set<uint32_t> icons,languages;
+    auto walk=[&](auto &&self,size_t relative,size_t depth,uint32_t kind,uint32_t identity)->void{
+        if(base==SIZE_MAX||depth>2||visited.size()>=4096||!visited.insert({relative,depth}).second||relative+16>resource_dir.second||relative>data.second-base||data.second-base-relative<16)return;
+        const auto at=base+relative;const auto count=std::min<uint64_t>(4096,v.read(at+12,2)+v.read(at+14,2));
+        for(size_t i=0;i<count;++i){
+            const auto q=at+16+i*8;if(q+8>data.second||q+8>uint64_t(base)+resource_dir.second)break;const auto name=uint32_t(v.read(q)),child=uint32_t(v.read(q+4));
+            const auto k=depth==0?name:kind,id=depth==1?name:identity;
+            if(child&0x80000000u){self(self,child&0x7fffffffu,depth+1,k,id);continue;}
+            if(uint64_t(child)+16>resource_dir.second||uint64_t(base)+child+16>data.second)continue;
+            const auto leaf=base+child,offset=v.map(v.read(leaf));const auto length=v.read(leaf+4);if(offset==SIZE_MAX||!length)continue;
+            resources.insert({offset,static_cast<size_t>(std::min<uint64_t>(length,data.second-offset))});if(k==3)icons.insert(id);if(depth==2&&!(name&0x80000000u))languages.insert(name);
+        }
+    };walk(walk,0,0,0,0);
+    for(const auto &resource:resources){const auto block=subspan(data,resource.first,resource.second);out[F_resource_total_size_ratio]+=block.second/file;out[F_resource_max_entropy]=std::max(out[F_resource_max_entropy],entropy(block));out[F_resource_embedded_pe_count]+=double(embedded_count(block));}
+    out[F_resource_embedded_pe_header]=out[F_resource_embedded_pe_count]>0;out[F_resource_icon_count]=double(icons.size());out[F_resource_language_id_count]=double(languages.size());
+}
+void extract(Span data,uint64_t total,const Pe &pe,const double *legacy,double *out) {
+    std::fill(out,out+COUNT,0.0);size_t at=16;for(const auto index:LEGACY_INDICES)out[at++]=legacy[index];
+    bytes(data,total,out);pe_features(data,total,pe,out);
+}
+} // namespace extended_ml
+
 bool ml_raw_features(const double *features,size_t count,double *margins,size_t capacity) {
     if(!features||!margins||count!=silverfox_ml_model::FEATURE_COUNT||capacity<silverfox_ml_model::CLASS_COUNT)return false;
     for(size_t i=0;i<count;++i)if(!std::isfinite(features[i]))return false;
@@ -352,9 +743,8 @@ bool ml_raw_features(const double *features,size_t count,double *margins,size_t 
     return true;
 }
 struct MlPrediction {double probability;size_t family;};
-MlPrediction ml_predict(Span sample,uint64_t total_len,const Pe &pe,bool valid_pe,const uint32_t *gpu_histogram,size_t gpu_histogram_len) {
-    std::array<double,271+MODEL_METADATA_COUNT> features{};
-    static_assert(silverfox_ml_model::FEATURE_COUNT==271+MODEL_METADATA_COUNT,"model feature count differs from native extractor");
+void ml_legacy_features(Span sample,uint64_t total_len,const Pe &pe,bool valid_pe,const uint32_t *gpu_histogram,size_t gpu_histogram_len,double *features) {
+    std::fill(features,features+271+MODEL_METADATA_COUNT,0.0);
     if (!sample.second) {
         features[256]=std::log1p(static_cast<double>(total_len));
     } else {
@@ -401,6 +791,14 @@ MlPrediction ml_predict(Span sample,uint64_t total_len,const Pe &pe,bool valid_p
             if(std::find(EXCLUDED_MODEL_METADATA.begin(),EXCLUDED_MODEL_METADATA.end(),source)==EXCLUDED_MODEL_METADATA.end())
                 features[target++]=metadata[source];
     }
+}
+MlPrediction ml_predict(Span sample,uint64_t total_len,const Pe &pe,bool valid_pe,const uint32_t *gpu_histogram,size_t gpu_histogram_len) {
+    static_assert(silverfox_ml_model::FEATURE_COUNT==327 || silverfox_ml_model::FEATURE_COUNT==silverfox_features::COUNT,"model feature schema differs from native extractor");
+    std::array<double,327> legacy{};
+    ml_legacy_features(sample,total_len,pe,valid_pe,gpu_histogram,gpu_histogram_len,legacy.data());
+    std::array<double,silverfox_ml_model::FEATURE_COUNT> features{};
+    if constexpr(silverfox_ml_model::FEATURE_COUNT==327){std::copy(legacy.begin(),legacy.end(),features.begin());}
+    else{extended_ml::extract(sample,total_len,pe,legacy.data(),features.data());}
     std::array<double,silverfox_ml_model::CLASS_COUNT> margins{};
     if(!ml_raw_features(features.data(),features.size(),margins.data(),margins.size()))return {-1.0,0};
     const double largest=*std::max_element(margins.begin(),margins.end());
@@ -476,6 +874,15 @@ extern "C" __declspec(dllexport) int __cdecl sf_extract_pe_metadata_context(cons
     Pe pe{};Span sample{bytes,length};if(!parse_pe(sample,pe))return 0;
     (void)path;(void)siblings;pe_metadata(sample,total_len,pe,out);return int(PE_METADATA_COUNT);
 }
+// Extraction ABI is independent of the currently embedded model's dimensions.
+extern "C" __declspec(dllexport) size_t __cdecl sf_extended_feature_count(){return silverfox_features::COUNT;}
+extern "C" __declspec(dllexport) unsigned __cdecl sf_feature_schema_version(){return 2;}
+extern "C" __declspec(dllexport) int __cdecl sf_extract_extended_features(const uint8_t *bytes,size_t length,uint64_t total_len,double *out,size_t capacity){
+    if(!bytes||!out||length>256ull*1024*1024||capacity<silverfox_features::COUNT)return 0;
+    Pe pe{};Span sample{bytes,length};if(!parse_pe(sample,pe))return 0;
+    std::array<double,327> legacy{};ml_legacy_features(sample,total_len,pe,true,nullptr,0,legacy.data());
+    extended_ml::extract(sample,total_len,pe,legacy.data(),out);return int(silverfox_features::COUNT);
+}
 extern "C" __declspec(dllexport) double __cdecl sf_ml_probability(const uint8_t *bytes,size_t length,uint64_t total_len) {
     if(!bytes||length>256ull*1024*1024||total_len<silverfox_ml_model::MIN_FILE_BYTES)return 0.0;
     Pe pe{};Span sample{bytes,length};if(!parse_pe(sample,pe))return 0.0;
@@ -487,7 +894,7 @@ extern "C" __declspec(dllexport) double __cdecl sf_ml_probability_context(const 
     (void)path;(void)siblings;
     return ml_probability(sample,total_len,pe,true,nullptr,0);
 }
-extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.7.1";}
+extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.8.1";}
 
 #include "configuration_scan.h"
 

@@ -12,7 +12,6 @@ const RULE_PUBLIC_KEY_HEX:&str=match option_env!("SILVERFOX_RULE_PUBLIC_KEY_HEX"
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Manifest { pub channel:String, pub version:String, pub available:bool, pub url:Option<String>, pub sha256:Option<String>, pub signature:Option<String>, pub algorithm:Option<String> }
 
-const EMBEDDED_ENGINE:&[u8]=include_bytes!("../engine/algorithms.dll");
 const EMBEDDED_MANIFEST:&[u8]=include_bytes!("../rules/seed/rules.manifest.json");
 const EMBEDDED_PACKAGE:&[u8]=include_bytes!("../rules/seed/rules.package.zip");
 
@@ -21,18 +20,24 @@ pub fn current_rule_version()->String{CURRENT_RULE_VERSION.lock().unwrap_or_else
 pub(crate) fn set_current_rule_version(version:&str){*CURRENT_RULE_VERSION.lock().unwrap_or_else(|error|error.into_inner())=version.to_owned();}
 
 pub fn embedded_engine()->Result<(Manifest,&'static [u8])>{
-    let manifest:Manifest=serde_json::from_slice(EMBEDDED_MANIFEST).context("内嵌算法清单无效")?;
-    let verified=verified_rules_from_package(EMBEDDED_PACKAGE,&manifest).context("内嵌签名病毒库无效")?;
-    if verified.engine.as_slice()!=EMBEDDED_ENGINE { anyhow::bail!("内嵌算法 DLL 与签名病毒库不一致"); }
-    Ok((manifest,EMBEDDED_ENGINE))
+    // Embed only the signed ZIP; verify/decompress once and retain its DLL.
+    static CACHE:std::sync::OnceLock<std::result::Result<(Manifest,Vec<u8>),String>>=std::sync::OnceLock::new();
+    let cached=CACHE.get_or_init(||{
+        (|| -> Result<(Manifest,Vec<u8>)> {
+            let manifest:Manifest=serde_json::from_slice(EMBEDDED_MANIFEST).context("内嵌算法清单无效")?;
+            let verified=verified_rules_from_package(EMBEDDED_PACKAGE,&manifest).context("内嵌签名病毒库无效")?;
+            Ok((manifest,verified.engine))
+        })().map_err(|error|format!("{error:#}"))
+    });
+    let (manifest,engine)=cached.as_ref().map_err(|error|anyhow::anyhow!(error.clone()))?;
+    Ok((manifest.clone(),engine.as_slice()))
 }
 
 /// Restore only a corrupt installed manifest/pointer from the immutable,
 /// independently signed package compiled into this release.  This is a repair,
 /// not an unsigned fallback and never makes a network request.
 pub fn repair_installed_package_from_embedded() -> Result<()> {
-    let manifest:Manifest=serde_json::from_slice(EMBEDDED_MANIFEST).context("内嵌算法清单无效")?;
-    verified_rules_from_package(EMBEDDED_PACKAGE,&manifest).context("内嵌签名病毒库无效")?;
+    let (manifest,_)=embedded_engine()?;
     let root=rules_root()?;
     let digest=hex::encode(Sha256::digest(EMBEDDED_PACKAGE));
     let directory=root.join("versions").join(&digest);

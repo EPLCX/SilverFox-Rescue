@@ -86,7 +86,26 @@ def main():
         with path.open("rb") as handle: data = handle.read(min(path.stat().st_size, READ_LIMIT))
         root = Path(report["dataset"]) / row["family"].split("/", 1)[0]
         peers = sibling_names(path, root)
-        x = extract_features(data, path.stat().st_size, path, peers)
+        if int(re.search(r"FEATURE_COUNT = (\d+);", header).group(1)) == 327:
+            x = extract_features(data, path.stat().st_size, path, peers)
+        else:
+            if __package__:
+                from .train_lightgbm import extract_feature_vector
+            else:
+                from train_lightgbm import extract_feature_vector
+            x = extract_feature_vector(data, path.stat().st_size, path, peers)
+            extractor = dll.sf_extract_extended_features
+            extractor.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint64,
+                                  pointer, ctypes.c_size_t]
+            extractor.restype = ctypes.c_int
+            output = np.zeros(len(x), dtype=np.float64)
+            buffer = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+            if extractor(buffer, len(data), path.stat().st_size, output.ctypes.data_as(pointer), len(output)) != len(x):
+                raise RuntimeError("native v2 feature extraction failed")
+            if not np.allclose(x, output, rtol=1e-10, atol=1e-10):
+                worst_feature = int(np.argmax(np.abs(x-output)))
+                raise RuntimeError(f"native/Python feature mismatch: {path}, index {worst_feature}, "
+                                   f"Python {x[worst_feature]}, native {output[worst_feature]}")
         margins = [0.0] * class_count
         for tree, base in enumerate(offsets):
             node = 0

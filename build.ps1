@@ -22,6 +22,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($env:SILVERFOX_PROGRAM_PUBLIC_KEY_HEX) -and $env:SILVERFOX_PROGRAM_PUBLIC_KEY_HEX -notmatch '^[0-9a-fA-F]{64}$') { throw 'SILVERFOX_PROGRAM_PUBLIC_KEY_HEX must be a 32-byte Ed25519 public key in hex.' }
     # Verify that the engine DLL matches the engine embedded in the signed seed package.
     Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
     $seedPackage = Join-Path $projectRoot 'rules\seed\rules.package.zip'
     $engineDll = Join-Path $projectRoot 'engine\algorithms.dll'
     $archive = [System.IO.Compression.ZipFile]::OpenRead($seedPackage)

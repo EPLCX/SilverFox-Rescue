@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,13 +27,336 @@ from sklearn.metrics import average_precision_score, brier_score_loss, confusion
 from sklearn.model_selection import StratifiedGroupKFold
 
 if __package__:
-    from .train_static_ml import FEATURE_NAMES, c_float, load_extra_safe, load_samples, remove_conflicting_duplicates
+    from .train_static_ml import c_float, load_extra_safe, load_samples, remove_conflicting_duplicates
 else:
-    from train_static_ml import FEATURE_NAMES, c_float, load_extra_safe, load_samples, remove_conflicting_duplicates
+    from train_static_ml import c_float, load_extra_safe, load_samples, remove_conflicting_duplicates
+
+SCHEMA_VERSION = 2
+REMOVED_LEGACY = {"pe_timestamp", "pe_characteristics", "pe_dll_characteristics", "pe_entry_rva", "pe_image_size"}
+PADDING_NAMES = [
+    "max_byte_ratio", "max_byte_value", "top_run_byte_ratio", "nz_count_log1p",
+    "zero_run_max_ratio", "zero_in_long_runs_ratio", "zero_chunk_ratio",
+    "zero_ratio_overlay", "zero_ratio_sections", "nz_entropy",
+    "nz_chunk_entropy_mean", "nz_chunk_entropy_std", "nz_chunk_entropy_min", "nz_chunk_entropy_max",
+    "nz_printable_ratio", "nz_high_bit_ratio", "nz_unique_byte_ratio",
+    "chunk_count", "chunk_entropy_p10", "chunk_entropy_p50", "chunk_entropy_p90",
+]
+PE_EXTRA_NAMES = [
+    "resource_total_size_ratio", "resource_max_entropy", "resource_embedded_pe_header",
+    "resource_icon_count", "resource_language_id_count", "overlay_magic_zip",
+    "overlay_magic_7z", "overlay_magic_rar", "overlay_magic_nsis", "overlay_magic_inno",
+    "overlay_embedded_pe_count", "resource_embedded_pe_count", "embedded_pe_count",
+    "packer_upx_section", "packer_upx_magic", "packer_vmprotect_section", "packer_themida",
+    "packer_mpress", "packer_aspack", "e_language_krnln_import", "e_language_eapi_string",
+    "rich_header_present", "linker_major", "linker_minor", "os_major", "os_minor",
+    "subsystem_major", "subsystem_minor", "code_size_ratio", "initialized_data_size_ratio",
+    "uninitialized_data_size_ratio", "headers_size_anomalous", "tls_present", "tls_callback_count",
+    "debug_directory_present", "pdb_path_present", "relocations_present", "load_config_present",
+    "entry_section_entropy", "entry_section_is_last", "entry_section_name_standard",
+    "section_raw_virtual_ratio_max", "section_raw_virtual_ratio_min",
+    "section_entropy_max", "section_entropy_min", "section_entropy_weighted_mean",
+    "entry_pre256_entropy", "entry_rva_image_ratio", "image_file_ratio",
+    "entry_section_relative_offset", "timestamp_before_1995", "import_minimal_flag",
+    "delay_import_count", "bound_import_count", "import_ordinal_ratio",
+]
+API_GROUPS = {
+    "injection": ["VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread", "NtCreateThreadEx", "QueueUserAPC", "SetThreadContext"],
+    "keyboard": ["SetWindowsHookExA", "SetWindowsHookExW", "GetAsyncKeyState", "GetKeyState", "GetRawInputData"],
+    "anti_debug": ["IsDebuggerPresent", "CheckRemoteDebuggerPresent", "NtQueryInformationProcess", "OutputDebugStringA", "OutputDebugStringW"],
+    "network": ["InternetOpenA", "InternetOpenW", "InternetConnectA", "InternetConnectW", "InternetReadFile", "URLDownloadToFileA", "URLDownloadToFileW", "WinHttpOpen", "WinHttpConnect", "WinHttpSendRequest", "connect", "send", "recv"],
+    "service": ["OpenSCManagerA", "OpenSCManagerW", "CreateServiceA", "CreateServiceW", "StartServiceA", "StartServiceW", "ControlService"],
+    "registry": ["RegCreateKeyExA", "RegCreateKeyExW", "RegSetValueExA", "RegSetValueExW", "RegDeleteValueA", "RegDeleteValueW"],
+    "crypto": ["CryptEncrypt", "CryptDecrypt", "CryptAcquireContextA", "CryptAcquireContextW", "BCryptEncrypt", "BCryptDecrypt"],
+}
+DLL_BITS = {"high_entropy_va": 0x20, "aslr": 0x40, "force_integrity": 0x80, "nx_compat": 0x100,
+            "no_seh": 0x400, "appcontainer": 0x1000, "cfg": 0x4000, "terminal_server_aware": 0x8000}
+COFF_BITS = {"relocs_stripped": 1, "executable_image": 2, "line_nums_stripped": 4, "local_syms_stripped": 8,
+             "large_address_aware": 0x20, "machine_32bit": 0x100, "debug_stripped": 0x200,
+             "removable_run_from_swap": 0x400, "net_run_from_swap": 0x800, "system": 0x1000, "dll": 0x2000}
+EXTRA_NAMES = (PADDING_NAMES + PE_EXTRA_NAMES
+               + [f"api_{group}_{api.lower()}" for group, names in API_GROUPS.items() for api in names]
+               + [f"dll_flag_{name}" for name in DLL_BITS]
+               + [f"coff_flag_{name}" for name in COFF_BITS]
+               + [f"rich_hash_{i:02d}" for i in range(16)]
+               + [f"import_api_hash_{i:03d}" for i in range(128)]
+               + [f"import_dll_hash_{i:02d}" for i in range(32)]
+               + [f"byte_entropy_{e:02d}_{b:02d}" for e in range(16) for b in range(16)])
+
+def model_names(legacy_names):
+    return ([f"byte_bucket_{i:02d}" for i in range(16)]
+            + [n for n in legacy_names[256:] if n not in REMOVED_LEGACY] + EXTRA_NAMES)
+
+LEGACY_FEATURE_NAMES = static_ml.FEATURE_NAMES
+FEATURE_NAMES = model_names(LEGACY_FEATURE_NAMES)
+
+ASCII_LOWER = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
+STANDARD_SECTIONS = {'.text', '.data', '.rdata', '.rsrc', '.reloc', '.bss', '.idata', '.edata', '.tls', '.pdata', '.xdata', '.debug'}
+
+def fnv1a(value):
+    result = 2166136261
+    for b in value:
+        result = ((result ^ b) * 16777619) & 0xffffffff
+    return result
+
+def entropy(counts, length):
+    if not length:
+        return 0.0
+    p = counts[counts > 0].astype(np.float64) / length
+    return float(-(p * np.log2(p)).sum())
+
+def block_entropy(data):
+    counts = np.zeros(256, dtype=np.int64)
+    for at in range(0, len(data), 1024*1024):
+        a = np.frombuffer(data, dtype=np.uint8, count=min(1024*1024,len(data)-at), offset=at)
+        counts += np.bincount(a, minlength=256)
+    return entropy(counts, len(data))
+
+def pe_headers(data):
+    def read(at, size=4):
+        return int.from_bytes(data[at:at+size], 'little') if 0 <= at <= len(data)-size else 0
+    p = read(60)
+    if len(data) < 64 or data[:2] != b'MZ' or p > len(data)-24 or data[p:p+4] != b'PE\0\0':
+        return None
+    optional = read(p+20, 2)
+    if optional > len(data)-p-24:
+        return None
+    o = p+24; magic = read(o, 2); sections=[]
+    for i in range(min(read(p+6, 2), 64)):
+        at=o+optional+i*40
+        if at > len(data)-40:
+            break
+        sections.append((data[at:at+8].split(b'\0')[0].decode('latin1').translate(ASCII_LOWER), read(at+20), read(at+16), read(at+12), read(at+8)))
+    def map_rva(rva):
+        for _, offset, raw, va, virtual in sections:
+            if va <= rva < va+max(raw, virtual) and rva-va < raw and offset+rva-va < len(data):
+                return offset+rva-va
+        return rva if rva < read(o+60) and rva < len(data) else None
+    def directory(index):
+        relative=112 if magic==0x20b else 96
+        at=o+relative+index*8
+        return (read(at),read(at+4)) if magic in (0x10b,0x20b) and relative+index*8+8<=optional and index<read(o+relative-4) else (0,0)
+    return read,p,o,magic,sections,map_rva,directory
+
+def embedded_pe_count(data):
+    count=0; at=data.find(b'MZ')
+    while at>=0:
+        if at+64<=len(data):
+            offset=int.from_bytes(data[at+60:at+64],'little')
+            if 64<=offset<1048576 and at+offset+24<=len(data) and data[at+offset:at+offset+4]==b'PE\0\0':
+                count+=1
+        at=data.find(b'MZ',at+2)
+    return count
+
+def byte_extras(data, total_size, out):
+    a=np.frombuffer(data,dtype=np.uint8); n=len(a); denominator=max(total_size,1)
+    counts=np.zeros(256,dtype=np.int64)
+    long_total=zero_max=zero_long=0; carry_value=None; carry_length=0
+    for at in range(0,n,1024*1024):
+        block=a[at:at+1024*1024];counts+=np.bincount(block,minlength=256)
+        boundary=np.r_[0,np.flatnonzero(block[1:]!=block[:-1])+1,len(block)]
+        lengths=np.diff(boundary); values=block[boundary[:-1]]
+        if carry_value is not None:
+            if int(values[0])==carry_value:lengths[0]+=carry_length
+            else:
+                if carry_length>=256:long_total+=carry_length;zero_long+=carry_length if carry_value==0 else 0
+                if carry_value==0:zero_max=max(zero_max,carry_length)
+        carry_value=int(values[-1]);carry_length=int(lengths[-1]);lengths=lengths[:-1];values=values[:-1]
+        long=lengths>=256;zero=values==0
+        long_total+=int(lengths[long].sum());zero_long+=int(lengths[zero & long].sum());zero_max=max(zero_max,int(lengths[zero].max(initial=0)))
+    if carry_value is not None:
+        if carry_length>=256:long_total+=carry_length;zero_long+=carry_length if carry_value==0 else 0
+        if carry_value==0:zero_max=max(zero_max,carry_length)
+    dominant=int(counts.argmax()); out['max_byte_value']=dominant; out['max_byte_ratio']=counts[dominant]/max(n,1)
+    out['nz_count_log1p']=math.log1p(n-int(counts[0]))
+    out['top_run_byte_ratio']=long_total/denominator;out['zero_run_max_ratio']=zero_max/denominator
+    out['zero_in_long_runs_ratio']=zero_long/max(int(counts[0]),1)
+    chunk_ent=[]; nz_ent=[]; zero_chunks=0
+    nz_counts=counts.copy(); nz_counts[0]=0; nz_n=int(n-counts[0])
+    for at in range(0,n,65536):
+        chunk=a[at:at+65536]; c=np.bincount(chunk,minlength=256)
+        chunk_ent.append(entropy(c,len(chunk))); zero_chunks+=bool(len(chunk)==65536 and c[0]==65536)
+        retained=int(len(chunk)-c[0]); c[0]=0
+        if retained:
+            nz_ent.append(entropy(c,retained))
+    out['chunk_count']=len(chunk_ent); out['zero_chunk_ratio']=zero_chunks/max(n//65536,1)
+    for label,value in zip(('p10','p50','p90'),np.quantile(chunk_ent or [0.], [.1,.5,.9])):
+        out['chunk_entropy_'+label]=float(value)
+    nz=np.asarray(nz_ent or [0.]); out['nz_entropy']=entropy(nz_counts,nz_n)
+    for label,value in zip(('mean','std','min','max'),(nz.mean(),nz.std(),nz.min(),nz.max())):
+        out['nz_chunk_entropy_'+label]=float(value)
+    out['nz_printable_ratio']=(counts[9]+counts[10]+counts[13]+counts[32:127].sum())/max(nz_n,1)
+    out['nz_high_bit_ratio']=counts[128:].sum()/max(nz_n,1)
+    out['nz_unique_byte_ratio']=np.count_nonzero(nz_counts)/256.
+    histogram=np.zeros((16,16),dtype=np.float64)
+    # EMBER window/stride and high-nibble entropy bins. Use float64 in both runtimes.
+    starts=range(0,n-2048+1,1024) if n>=2048 else ([0] if n else [])
+    for at in starts:
+        c=np.bincount(a[at:at+2048]>>4,minlength=16)
+        e=min(15,int(entropy(c,2048)*4)); histogram[e]+=c
+    if histogram.sum():
+        histogram/=histogram.sum()
+    for e in range(16):
+        for b in range(16):
+            out[f'byte_entropy_{e:02d}_{b:02d}']=histogram[e,b]
+    return counts
+
+def pe_extras(data,total_size,overlay_parts,out):
+    h=pe_headers(data)
+    if h is None:
+        return
+    read,p,o,magic,sections,map_rva,directory=h; denominator=max(total_size,1)
+    def cstring(at,limit=256):
+        if at is None:
+            return b''
+        return data[at:at+limit].split(b'\0')[0]
+    overlay_length=sum(len(part) for part in overlay_parts)
+    out['zero_ratio_overlay']=sum(part.count(0) for part in overlay_parts)/max(overlay_length,1)
+    section_parts=[data[offset:offset+min(raw,max(len(data)-offset,0))] for _,offset,raw,_,_ in sections]
+    out['zero_ratio_sections']=sum(part.count(0) for part in section_parts)/max(sum(map(len,section_parts)),1)
+    out['overlay_embedded_pe_count']=sum(embedded_pe_count(part) for part in overlay_parts)
+    out['embedded_pe_count']=max(0,embedded_pe_count(data)-1)
+    signatures={'zip':[b'PK\x03\x04',b'PK\x05\x06',b'PK\x07\x08'],'7z':[b'7z\xbc\xaf\x27\x1c'],
+                'rar':[b'Rar!\x1a\x07\x00',b'Rar!\x1a\x07\x01\x00'],'nsis':[b'NullsoftInst'],
+                'inno':[b'Inno Setup Setup Data',b'Inno Setup Messages']}
+    for name,markers in signatures.items():
+        out['overlay_magic_'+name]=int(any(marker in part for marker in markers for part in overlay_parts))
+    names={s[0] for s in sections}
+    out['packer_upx_section']=int(any(name.startswith('upx') for name in names)); out['packer_upx_magic']=int(b'UPX!' in data)
+    out['packer_vmprotect_section']=int(bool(names & {'.vmp0','.vmp1','.vmp2'}))
+    out['packer_themida']=int('.themida' in names or b'Themida' in data or b'THEMIDA' in data)
+    out['packer_mpress']=int(any(name.startswith('.mpress') for name in names) or b'MPRESS' in data)
+    out['packer_aspack']=int(bool(names & {'.aspack','.adata'}) or b'ASPack' in data)
+    out['e_language_eapi_string']=int(b'eAPI' in data or b'EAPI' in data)
+    for name,at,size in [('linker_major',o+2,1),('linker_minor',o+3,1),('os_major',o+40,2),('os_minor',o+42,2),('subsystem_major',o+48,2),('subsystem_minor',o+50,2)]:
+        out[name]=read(at,size)
+    for name,at in [('code_size_ratio',o+4),('initialized_data_size_ratio',o+8),('uninitialized_data_size_ratio',o+12)]:
+        out[name]=read(at)/denominator
+    headers=read(o+60); alignment=read(o+36)
+    out['headers_size_anomalous']=int(headers<o+read(p+20,2)+read(p+6,2)*40 or headers>total_size or not alignment or headers%alignment!=0)
+    entry=read(o+16); image=read(o+56)
+    out['entry_rva_image_ratio']=entry/max(image,1); out['image_file_ratio']=image/denominator
+    out['timestamp_before_1995']=int(0<read(p+8)<788918400)
+    for name,bit in DLL_BITS.items():out['dll_flag_'+name]=int(bool(read(o+70,2)&bit))
+    for name,bit in COFF_BITS.items():out['coff_flag_'+name]=int(bool(read(p+22,2)&bit))
+    ents=[block_entropy(part) for part in section_parts]; ratios=[raw/max(virtual,1) for _,_,raw,_,virtual in sections]
+    if sections:
+        out['section_entropy_max']=max(ents); out['section_entropy_min']=min(ents)
+        out['section_entropy_weighted_mean']=sum(e*len(part) for e,part in zip(ents,section_parts))/max(sum(map(len,section_parts)),1)
+        out['section_raw_virtual_ratio_max']=max(ratios); out['section_raw_virtual_ratio_min']=min(ratios)
+    for i,(_,offset,raw,va,virtual) in enumerate(sections):
+        if va<=entry<va+max(raw,virtual):
+            out['entry_section_entropy']=ents[i]; out['entry_section_is_last']=int(i==len(sections)-1)
+            out['entry_section_name_standard']=int(sections[i][0] in STANDARD_SECTIONS)
+            out['entry_section_relative_offset']=(entry-va)/max(raw,virtual,1)
+            at=map_rva(entry)
+            if at is not None:out['entry_pre256_entropy']=block_entropy(data[max(offset,at-256):at])
+            break
+    imagebase=read(o+24,8) if magic==0x20b else read(o+28)
+    for name,index in [('tls_present',9),('debug_directory_present',6),('relocations_present',5),('load_config_present',10)]:
+        rva,size=directory(index);out[name]=int(bool(rva and size))
+    tls=map_rva(directory(9)[0]) if directory(9)[0] else None
+    if tls is not None:
+        address=read(tls+(24 if magic==0x20b else 12),8 if magic==0x20b else 4)
+        at=map_rva(address-imagebase) if address>=imagebase else None; step=8 if magic==0x20b else 4
+        if at is not None:
+            for i in range(min(4096,max((len(data)-at)//step,0))):
+                if not read(at+i*step,step):break
+                out['tls_callback_count']+=1
+    rva,size=directory(6); at=map_rva(rva) if rva else None
+    if at is not None:
+        for i in range(min(size//28,4096)):
+            d=at+i*28
+            if d+28>len(data):break
+            if read(d+12)==2:
+                q=read(d+24); length=read(d+16); sig=data[q:q+4]; skip=24 if sig==b'RSDS' else 16 if sig==b'NB10' else 0
+                if skip and length>skip and q+length<=len(data) and cstring(q+skip,min(length-skip,4096)):out['pdb_path_present']=1
+    rich=data.rfind(b'Rich',0,min(p,len(data)))
+    if rich>=0 and rich+8<=p:
+        key=read(rich+4); start=rich-4
+        while start>=64 and (read(start)^key)!=0x536e6144:start-=4
+        if start>=64 and start+16<=rich:
+            out['rich_header_present']=1
+            for at in range(start+16,rich-7,8):out[f'rich_hash_{fnv1a(struct.pack("<I",read(at)^key))%16:02d}']=1
+    apis=set(); dlls=set(); ordinal=0; total=0; delay_count=0
+    for index,step,limit in [(1,20,512),(13,32,512)]:
+        rva,size=directory(index); at=map_rva(rva) if rva else None
+        if at is None:continue
+        for i in range(min(limit,size//step if size else limit)):
+            d=at+i*step
+            if d+step>len(data) or not any(data[d:d+step]):break
+            attr=read(d); name=read(d+(12 if index==1 else 4)); thunk=read(d) or read(d+16) if index==1 else read(d+16) or read(d+12)
+            if index==13 and not attr&1:
+                name=name-imagebase if name>=imagebase else -1; thunk=thunk-imagebase if thunk>=imagebase else -1
+            dll=cstring(map_rva(name),260).decode('latin1').translate(ASCII_LOWER); dlls.add(dll)
+            q=map_rva(thunk); width=8 if magic==0x20b else 4
+            if q is None:continue
+            for j in range(1024):
+                if q+j*width+width>len(data):break
+                value=read(q+j*width,width)
+                if not value:break
+                total+=1; delay_count+=int(index==13)
+                if value&(1<<(width*8-1)):ordinal+=1;continue
+                name_at=map_rva(value&0xffffffff)
+                if name_at is not None:apis.add(cstring(name_at+2,254).decode('latin1').translate(ASCII_LOWER))
+    out['delay_import_count']=delay_count;out['import_ordinal_ratio']=ordinal/max(total,1)
+    out['import_minimal_flag']=int(bool(apis) and not ordinal and 'getprocaddress' in apis and bool(apis&{'loadlibrarya','loadlibraryw','loadlibraryexa','loadlibraryexw'}) and apis<={'getprocaddress','loadlibrarya','loadlibraryw','loadlibraryexa','loadlibraryexw'})
+    out['e_language_krnln_import']=int(any('krnln' in name for name in dlls))
+    for group,names in API_GROUPS.items():
+        for name in names:out[f'api_{group}_{name.lower()}']=int(name.lower() in apis)
+    for name in apis:out[f'import_api_hash_{fnv1a(name.encode("latin1"))%128:03d}']=1
+    for name in dlls:
+        if name:out[f'import_dll_hash_{fnv1a(name.encode("latin1"))%32:02d}']=1
+    rva,size=directory(11); at=map_rva(rva) if rva else None; end=min(len(data),at+size) if at is not None else 0
+    while at is not None and at+8<=end and any(data[at:at+8]):
+        out['bound_import_count']+=1;at+=8*(1+read(at+6,2))
+    resource_rva,resource_size=directory(2); base=map_rva(resource_rva) if resource_rva else None
+    resources=set(); icons=set(); languages=set(); visited=set()
+    def walk(relative,depth,kind=0,ident=0):
+        if base is None or depth>2 or (relative,depth) in visited or len(visited)>=4096:return
+        visited.add((relative,depth));at=base+relative
+        if relative<0 or relative+16>resource_size or at+16>len(data):return
+        count=min(read(at+12,2)+read(at+14,2),4096)
+        for i in range(count):
+            q=at+16+i*8
+            if q+8>len(data) or q+8>base+resource_size:break
+            name=read(q); child=read(q+4); k=name if depth==0 else kind; identity=name if depth==1 else ident
+            if child&0x80000000:walk(child&0x7fffffff,depth+1,k,identity);continue
+            leaf=base+child
+            if child+16>resource_size or leaf+16>len(data):continue
+            offset=map_rva(read(leaf)); length=read(leaf+4)
+            if offset is None or not length:continue
+            resources.add((offset,min(length,len(data)-offset)))
+            if k==3:icons.add(identity)
+            if depth==2 and not name&0x80000000:languages.add(name)
+    walk(0,0)
+    for offset,length in resources:
+        block=data[offset:offset+length];out['resource_total_size_ratio']+=length/denominator
+        out['resource_max_entropy']=max(out['resource_max_entropy'],block_entropy(block));out['resource_embedded_pe_count']+=embedded_pe_count(block)
+    out['resource_embedded_pe_header']=int(out['resource_embedded_pe_count']>0)
+    out['resource_icon_count']=len(icons);out['resource_language_id_count']=len(languages)
+
+def extend_features(data,total_size,legacy,legacy_names,overlay_parts):
+    extra=dict.fromkeys(EXTRA_NAMES,0.)
+    counts=byte_extras(data,total_size,extra);pe_extras(data,total_size,overlay_parts,extra)
+    buckets=counts.reshape(16,16).sum(axis=1)/max(len(data),1)
+    selected=[legacy[i] for i,n in enumerate(legacy_names) if i>=256 and n not in REMOVED_LEGACY]
+    result=np.asarray([*buckets,*selected,*(extra[n] for n in EXTRA_NAMES)],dtype=np.float64)
+    if not np.isfinite(result).all():raise ValueError('non-finite v2 feature')
+    return result
+
+
+def extract_feature_vector(data, total_size, path=None, siblings=None):
+    legacy = static_ml.extract_features(data, total_size, path, siblings)
+    parts = []
+    if legacy[267] > 0.5:
+        start, _, certificate, certificate_size = static_ml.overlay_info(data, total_size)
+        parts = ([data[start:certificate], data[certificate+certificate_size:]]
+                 if certificate_size else [data[start:]])
+    return extend_features(data, total_size, legacy, LEGACY_FEATURE_NAMES, parts)
 
 
 CONFIGS = {
-    "specified": dict(n_estimators=1000, learning_rate=0.03, num_leaves=23, max_depth=-1,
+    "specified": dict(n_estimators=700, learning_rate=0.03, num_leaves=23, max_depth=-1,
                        min_child_samples=15, subsample=1.0, subsample_freq=1,
                        colsample_bytree=0.7, reg_lambda=6.0, min_split_gain=0.0,
                        random_state=42, n_jobs=-1, deterministic=True, force_row_wise=True),
@@ -233,6 +557,7 @@ def write_header(path, tree, classes, suspicious, malicious, slope, intercept, t
             "#include <array>", "#include <cstddef>", "#include <cstdint>",
             "namespace silverfox_ml_model {",
             f"inline constexpr std::size_t FEATURE_COUNT = {len(FEATURE_NAMES)};",
+            f"inline constexpr unsigned FEATURE_SCHEMA_VERSION = {SCHEMA_VERSION};",
             f"inline constexpr std::size_t CLASS_COUNT = {len(classes)};",
             f"inline constexpr std::size_t TREE_COUNT = {len(offsets)};",
             f"inline constexpr std::size_t NODE_COUNT = {len(features)};",
@@ -288,8 +613,10 @@ def main():
     if not hasattr(static_ml._metadata_function[0], "sf_pe_overlay_info"):
         raise RuntimeError("DLL lacks corrected overlay extractor; run engine/build-engine.bat or specify --engine")
     safe_catalog = load_safe_catalog(args.safe_classification)
-    samples, skipped = load_samples(args.dataset, safe_catalog)
-    samples.extend(load_extra_safe(args.extra_safe, safe_catalog))
+    samples, skipped = load_samples(args.dataset, safe_catalog, feature_extractor=extract_feature_vector,
+                                    valid_pe_index=FEATURE_NAMES.index("valid_pe"))
+    samples.extend(load_extra_safe(args.extra_safe, safe_catalog, feature_extractor=extract_feature_vector,
+                                   valid_pe_index=FEATURE_NAMES.index("valid_pe")))
     samples, conflicts = remove_conflicting_duplicates(samples)
     if not samples:
         raise RuntimeError("no eligible PE samples")
@@ -401,6 +728,7 @@ def main():
     report = {
         "model": "LightGBM single multiclass GBDT", "trained_at_utc": timestamp,
         "dataset": str(args.dataset), "feature_count": len(FEATURE_NAMES), "feature_names": FEATURE_NAMES,
+        "feature_importance_gain": dict(zip(FEATURE_NAMES, map(float, final.booster_.feature_importance(importance_type="gain")))),
         "extra_safe_paths": [str(path) for path in args.extra_safe],
         "class_names": classes, "class_counts": dict(zip(classes, map(int, counts))),
         "sample_count": len(y), "final_fit_count": len(y), "virus_pe_samples": int(focus.sum()),
@@ -408,7 +736,11 @@ def main():
         "evaluation": "grouped_5_fold" if args.evaluate else "not_performed",
         "selected_config": best_name, "candidate_configs": CONFIGS, "split_seed": args.seed,
         "group_audit": group_audit,
-        "feature_extractor": {"engine": str(static_ml.ENGINE_DLL), "overlay": "exclude structurally validated WIN_CERTIFICATE regions"},
+        "feature_extractor": {"engine": str(static_ml.ENGINE_DLL),
+                              "schema_version": SCHEMA_VERSION,
+                              "byte_statistics": "original bytes; 16 byte buckets, 256 EMBER entropy bins, separate padding/nonzero statistics",
+                              "pe_metadata": "original bytes and original total size",
+                              "overlay": "exclude structurally validated WIN_CERTIFICATE regions"},
         "safe_classification": {"inventory": str(args.safe_classification),
                                 "category_counts": {category: sum(category in sample.safe_categories for sample in samples if sample.label == 0)
                                                     for category in sorted({c for sample in samples if sample.label == 0 for c in sample.safe_categories})}},

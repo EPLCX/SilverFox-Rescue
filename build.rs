@@ -37,7 +37,7 @@ fn main(){
     let cloud_url=if cloud_url.contains("://"){cloud_url.to_owned()}else{format!("https://{cloud_url}")};
     assert!(cloud_url.starts_with("https://")&&!cloud_url.contains(['\r','\n']),"update site must use HTTPS");
     println!("cargo:rustc-env=SILVERFOX_CLOUD_URL={cloud_url}");
-    println!("cargo:rerun-if-changed=engine/algorithms.dll");println!("cargo:rerun-if-changed=rules/seed/rules.manifest.json");
+    println!("cargo:rerun-if-changed=engine/algorithms.dll");println!("cargo:rerun-if-changed=rules/seed/rules.manifest.json");println!("cargo:rerun-if-changed=rules/seed/rules.package.zip");
     for(name,label)in[("SILVERFOX_RULE_PUBLIC_KEY_HEX","rule"),("SILVERFOX_PROGRAM_PUBLIC_KEY_HEX","program")]{if let Ok(value)=env::var(name){let value=value.trim();assert!(value.len()==64&&value.bytes().all(|c|c.is_ascii_hexdigit()),"{label} public key must be 32 bytes of hex");println!("cargo:rustc-env={name}={value}");}}
     let root=PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());let manifest=root.join("app.manifest");for shader in ["patterns.cso","entropy.cso"]{println!("cargo:rerun-if-changed={}",root.join("shaders").join(shader).display());}println!("cargo:rerun-if-changed={}",manifest.display());
     if env::var("PROFILE").as_deref()==Ok("release"){

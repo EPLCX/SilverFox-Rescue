@@ -273,7 +273,7 @@ def safe_categories(path: Path, data: bytes, catalog: dict) -> tuple[str, ...]:
     return tuple(classify(path, data)["categories"])
 
 
-def load_samples(dataset: Path, safe_catalog: dict | None = None) -> tuple[list[Sample], list[dict[str, object]]]:
+def load_samples(dataset: Path, safe_catalog: dict | None = None, *, feature_extractor=extract_features, valid_pe_index=267) -> tuple[list[Sample], list[dict[str, object]]]:
     definitions = [("safe", 0), ("others-virus", 1), ("virus", 1)]
     samples: list[Sample] = []
     skipped: list[dict[str, object]] = []
@@ -289,8 +289,8 @@ def load_samples(dataset: Path, safe_catalog: dict | None = None) -> tuple[list[
             with path.open("rb") as handle:
                 data = handle.read(min(size, READ_LIMIT))
             peers = sibling_names(path, family_root)
-            features = extract_features(data, size, path, peers)
-            if features[267] < 0.5:
+            features = feature_extractor(data, size, path, peers)
+            if features[valid_pe_index] < 0.5:
                 return None, {"path": str(path), "reason": "unsupported_non_pe", "size": size}
             group = (f"bundle:{family}:{path.parent.relative_to(root)}"
                      if path.parent != family_root else f"sample:{source}:{path.relative_to(root)}")
@@ -323,7 +323,7 @@ def remove_conflicting_duplicates(samples: list[Sample]) -> tuple[list[Sample], 
     return [sample for sample in samples if sample.group not in conflicts], conflicts
 
 
-def load_extra_safe(paths: list[Path], safe_catalog: dict | None = None) -> list[Sample]:
+def load_extra_safe(paths: list[Path], safe_catalog: dict | None = None, *, feature_extractor=extract_features, valid_pe_index=267) -> list[Sample]:
     samples = []
     for path in paths:
         if not path.is_file():
@@ -333,8 +333,8 @@ def load_extra_safe(paths: list[Path], safe_catalog: dict | None = None) -> list
             raise ValueError(f"extra safe regression file exceeds runtime limit: {path}")
         with path.open("rb") as handle:
             data = handle.read(min(size, READ_LIMIT))
-        features = extract_features(data, size, path, sibling_names(path))
-        if features[267] < 0.5:
+        features = feature_extractor(data, size, path, sibling_names(path))
+        if features[valid_pe_index] < 0.5:
             raise ValueError(f"extra safe regression file is not a valid PE: {path}")
         categories = safe_categories(path, data, safe_catalog) if safe_catalog is not None else ()
         samples.append(Sample(path, 0, "safe-regression", size, f"safe-regression:{path}", features, categories))
