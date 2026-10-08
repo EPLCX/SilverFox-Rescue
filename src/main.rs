@@ -2460,7 +2460,16 @@ unsafe fn remediate(hwnd:HWND){
                 Err(error)=>queue(format!("[{}/{}] 查询文件占用者失败：{}；继续隔离",position+1,count,error))
             }
             }
-            match quarantine::quarantine_with_retries(&fresh,&app.scan_cancel,|attempt,error|queue(format!("[{}/{}] 隔离第 {} 次失败：{}；准备重试",position+1,count,attempt,error))){
+            match quarantine::quarantine_with_retries(&fresh,&app.scan_cancel,|attempt,error|{
+                queue(format!("[{}/{}] 清理第 {}/3 次失败：{}；解除占用后重试",position+1,count,attempt,error));
+                if fresh.source!="quick-ci-policy"{
+                    stop_processes_before_quarantine_queued(&finding.path);
+                    match process_control::terminate_file_lockers(&finding.path){
+                        Ok(results)=>for result in results{if let Some(error)=result.error{queue(format!("[{}/{}] 解除占用 PID {} 失败：{}",position+1,count,result.pid,error));}else{queue(format!("[{}/{}] 已解除占用进程 PID {}",position+1,count,result.pid));}},
+                        Err(error)=>queue(format!("[{}/{}] 查询文件占用者失败：{}",position+1,count,error))
+                    }
+                }
+            }){
                 Ok(result)=>{cleaned+=1;if result.pending_reboot{pending+=1;}queue(format!("[{}/{}] {}：{}",position+1,count,if result.pending_reboot{"已登记重启后处理"}else{"已隔离"},finding.path.display()));},
                 Err(error)=>queue(format!("[{}/{}] 隔离失败 {}：{}",position+1,count,finding.path.display(),error))
             }

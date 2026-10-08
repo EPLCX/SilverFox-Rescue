@@ -6,7 +6,7 @@ use aes::Aes256;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{ffi::OsStr,fs,io::{Read,Write},os::windows::{ffi::OsStrExt,process::CommandExt},path::{Path,PathBuf},process::{Command,Stdio},ptr::{null,null_mut},time::{Duration,SystemTime,UNIX_EPOCH,Instant}};
-use windows_sys::Win32::{Foundation::{CloseHandle,LocalFree},Security::{AdjustTokenPrivileges,CreateWellKnownSid,LookupPrivilegeValueW,ACL,DACL_SECURITY_INFORMATION,LUID_AND_ATTRIBUTES,NO_INHERITANCE,OWNER_SECURITY_INFORMATION,TOKEN_ADJUST_PRIVILEGES,TOKEN_PRIVILEGES,TOKEN_QUERY,PROTECTED_DACL_SECURITY_INFORMATION,SE_PRIVILEGE_ENABLED,WinBuiltinAdministratorsSid,WinLocalSystemSid},Security::Authorization::{EXPLICIT_ACCESS_W,NO_MULTIPLE_TRUSTEE,SE_FILE_OBJECT,SET_ACCESS,SetEntriesInAclW,SetNamedSecurityInfoW,TRUSTEE_IS_SID,TRUSTEE_IS_WELL_KNOWN_GROUP,TRUSTEE_W},Storage::FileSystem::{MoveFileExW,SetFileAttributesW,FILE_ALL_ACCESS,FILE_ATTRIBUTE_NORMAL,MOVEFILE_DELAY_UNTIL_REBOOT},System::Threading::{GetCurrentProcess,OpenProcessToken}};
+use windows_sys::Win32::Storage::FileSystem::{MoveFileExW,SetFileAttributesW,FILE_ATTRIBUTE_NORMAL,MOVEFILE_DELAY_UNTIL_REBOOT};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineRecord { pub id: String, pub original_path: PathBuf, pub stored_path: PathBuf, #[serde(default)] pub pending_reboot:bool, #[serde(default)] pub encrypted:bool, pub finding: Finding }
@@ -58,14 +58,21 @@ pub fn is_quarantine_path(path: &Path) -> bool {
 
 pub fn quarantine_with_retries<F>(finding:&Finding,cancel:&std::sync::atomic::AtomicBool,mut on_retry:F)->Result<QuarantineRecord>
 where F:FnMut(usize,&anyhow::Error){
-    for attempt in 1..=3{
+    if cancel.load(std::sync::atomic::Ordering::Acquire){anyhow::bail!("处理已取消");}
+    quarantine(finding,cancel,&mut on_retry)
+}
+
+fn delete_with_retries<D,R>(cancel:&std::sync::atomic::AtomicBool,mut delete:D,mut on_retry:R)->Result<()>
+where D:FnMut()->std::io::Result<()>, R:FnMut(usize,&anyhow::Error){
+    for attempt in 1..=3 {
         if cancel.load(std::sync::atomic::Ordering::Acquire){anyhow::bail!("处理已取消");}
-        match quarantine(finding){
-            Ok(record)=>return Ok(record),
-            Err(error) if attempt==3=>return Err(error),
-            Err(error)=>on_retry(attempt,&error),
+        match delete(){
+            Ok(())=>return Ok(()),
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
+            Err(error) if attempt==3=>return Err(error.into()),
+            Err(error)=>on_retry(attempt,&error.into()),
         }
-        for _ in 0..4{
+        for _ in 0..4 {
             if cancel.load(std::sync::atomic::Ordering::Acquire){anyhow::bail!("处理已取消");}
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -73,7 +80,8 @@ where F:FnMut(usize,&anyhow::Error){
     unreachable!()
 }
 
-pub fn quarantine(finding: &Finding) -> Result<QuarantineRecord> {
+fn quarantine<F>(finding:&Finding,cancel:&std::sync::atomic::AtomicBool,on_retry:&mut F)->Result<QuarantineRecord>
+where F:FnMut(usize,&anyhow::Error){
     let digest = finding.sha256.as_deref().context("缺少文件哈希")?;
     let mut file = fs::File::open(&finding.path).context("处置前无法重新打开文件")?;
     let mut current = Sha256::new();
@@ -89,15 +97,14 @@ pub fn quarantine(finding: &Finding) -> Result<QuarantineRecord> {
     if let Err(error)=encrypt_file(&finding.path,&stored,digest){let _=fs::remove_file(&stored);return Err(error).context("加密隔离副本失败，原文件未删除");}
     let mut record = QuarantineRecord { id, original_path: finding.path.clone(), stored_path: stored, pending_reboot:false, encrypted:true, finding: finding.clone() };
     fs::write(dir.join("record.json"), serde_json::to_vec_pretty(&record)?)?;
-    if fs::remove_file(&finding.path).is_err(){
-        let _=repair_file_access(&finding.path);
-        if fs::remove_file(&finding.path).is_err(){
-            schedule_delete_after_reboot(&finding.path).context("原文件暂时无法删除，且无法登记重启后删除；加密副本已保留")?;
-            record.pending_reboot=true;
-            fs::write(dir.join("record.json"), serde_json::to_vec_pretty(&record)?)?;
-        }
-    }
-    if finding.source=="quick-ci-policy"{
+    let deleted=delete_with_retries(cancel,||fs::remove_file(&finding.path),|attempt,error|{
+        let repair=repair_file_access(&finding.path);
+        on_retry(attempt,&anyhow::anyhow!("{}；权限解除：{}",error,repair));
+    });
+    if let Err(error)=deleted {
+        if cancel.load(std::sync::atomic::Ordering::Acquire){return Err(error);}
+        schedule_delete_after_reboot(&finding.path)
+            .with_context(||format!("清理已尝试 3 次（{}），重启删除登记失败；加密副本已保留",error))?;
         record.pending_reboot=true;
         fs::write(dir.join("record.json"),serde_json::to_vec_pretty(&record)?)?;
     }
@@ -154,68 +161,58 @@ pub fn delete_all()->Result<usize>{
 
 fn wide(value:&OsStr)->Vec<u16>{value.encode_wide().chain(Some(0)).collect()}
 
+const ACCESS_REPAIR_COMMAND:&str=r#"takeown /f "%SFX_CLEANUP_PATH%" && icacls "%SFX_CLEANUP_PATH%" /grant administrators:F"#;
+
 fn repair_file_access(path:&Path)->String{
-    // Renaming needs DELETE on the file or DELETE_CHILD on its parent.  This is
-    // intentionally native: cleanup must not launch PowerShell/takeown/icacls.
-    let mut targets=vec![path];if let Some(parent)=path.parent(){if parent!=path{targets.push(parent);}}
-    let privilege=enable_take_ownership_privileges().map(|_|"SeTakeOwnershipPrivilege/SeRestorePrivilege=成功".to_string()).unwrap_or_else(|error|format!("特权启用失败：{}",error));
-    let tools=targets.iter().map(|target|takeown_and_acl(target)).collect::<Vec<_>>().join(" | ");
-    format!("{} | {} | {}",privilege,tools,targets.into_iter().map(repair_one_native).collect::<Vec<_>>().join(" | "))
-}
-
-fn takeown_and_acl(path:&Path)->String{
-    let text=path.to_string_lossy().to_string();
-    let take=run_admin_tool("takeown.exe",&["/F",&text,"/A","/D","Y"]);
-    let acl=run_admin_tool("icacls.exe",&[&text,"/grant","*S-1-5-32-544:F","/grant","*S-1-5-18:F"]);
-    format!("{}: takeown={}；icacls={}",path.display(),take,acl)
-}
-
-fn run_admin_tool(program:&str,args:&[&str])->String{
-    let mut child=match Command::new(program).args(args).creation_flags(0x08000000).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn(){Ok(child)=>child,Err(error)=>return format!("启动失败：{}",error)};
+    let source=if path.is_absolute(){path.to_path_buf()}else{match std::env::current_dir(){Ok(dir)=>dir.join(path),Err(error)=>return format!("路径解析失败：{}",error)}};
+    let value=wide(source.as_os_str());
+    unsafe{SetFileAttributesW(value.as_ptr(),FILE_ATTRIBUTE_NORMAL)};
+    let system=std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(||PathBuf::from(r"C:\Windows")).join("System32");
+    // Pass the path through the environment rather than inserting it into shell code.
+    // Disable delayed expansion so exclamation marks in file names remain literal.
+    let mut child=match Command::new(system.join("cmd.exe"))
+        .args(["/D","/V:OFF","/C"]).raw_arg(ACCESS_REPAIR_COMMAND)
+        .env("SFX_CLEANUP_PATH",source.as_os_str()).current_dir(&system)
+        .creation_flags(0x08000000).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn(){
+            Ok(child)=>child,Err(error)=>return format!("cmd.exe 启动失败：{}",error)
+        };
     let deadline=Instant::now()+Duration::from_secs(15);
-    loop{match child.try_wait(){Ok(Some(status))=>return format!("退出码 {}",status.code().unwrap_or(-1)),Ok(None)=>{if Instant::now()>=deadline{let _=child.kill();let _=child.wait();return "超时，已终止".into();}std::thread::sleep(Duration::from_millis(100));},Err(error)=>return format!("等待失败：{}",error)}}
+    loop{match child.try_wait(){
+        Ok(Some(status))=>return if status.success(){"takeown && icacls 成功".into()}else{format!("takeown && icacls 退出码 {}",status.code().unwrap_or(-1))},
+        Ok(None)=>{if Instant::now()>=deadline{let _=child.kill();let _=child.wait();return "权限解除超时，已终止 cmd.exe".into();}std::thread::sleep(Duration::from_millis(100));},
+        Err(error)=>return format!("等待 cmd.exe 失败：{}",error)
+    }}
 }
 
-fn enable_take_ownership_privileges()->Result<()> {
-    unsafe {
-        let mut token=std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(),TOKEN_ADJUST_PRIVILEGES|TOKEN_QUERY,&mut token)==0 {anyhow::bail!("OpenProcessToken：{}",std::io::Error::last_os_error());}
-        let result=(||{
-            for name in ["SeTakeOwnershipPrivilege","SeRestorePrivilege"]{
-                let mut entry=LUID_AND_ATTRIBUTES{Luid:std::mem::zeroed(),Attributes:SE_PRIVILEGE_ENABLED};
-                let wide:Vec<u16>=OsStr::new(name).encode_wide().chain(Some(0)).collect();
-                if LookupPrivilegeValueW(std::ptr::null(),wide.as_ptr(),&mut entry.Luid)==0 {anyhow::bail!("LookupPrivilegeValueW({})：{}",name,std::io::Error::last_os_error());}
-                let privileges=TOKEN_PRIVILEGES{PrivilegeCount:1,Privileges:[entry]};
-                if AdjustTokenPrivileges(token,0,&privileges,std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,std::ptr::null_mut(),std::ptr::null_mut())==0 {anyhow::bail!("AdjustTokenPrivileges({})：{}",name,std::io::Error::last_os_error());}
-            }
-            Ok(())
-        })();
-        CloseHandle(token);result
+fn pending_delete_matches(data:&[u16],source:&Path)->bool{
+    let normalize=|text:&str|text.strip_prefix(r"\??\").or_else(||text.strip_prefix(r"\\?\")).unwrap_or(text).replace('/',r"\").to_lowercase();
+    let expected=normalize(&source.to_string_lossy());
+    let mut entries=data.split(|&value|value==0);
+    while let (Some(from),Some(to))=(entries.next(),entries.next()) {
+        if !from.is_empty()&&to.is_empty()&&normalize(&String::from_utf16_lossy(from))==expected{return true;}
     }
+    false
 }
 
-fn well_known_sid(kind:i32)->Result<Vec<u8>>{
-    let mut bytes=vec![0u8;68];let mut size=bytes.len()as u32;
-    if unsafe{CreateWellKnownSid(kind,null_mut(),bytes.as_mut_ptr().cast(),&mut size)}==0{return Err(std::io::Error::last_os_error().into());}
-    bytes.truncate(size as usize);Ok(bytes)
+fn schedule_delete_after_reboot(source:&Path)->Result<()>{
+    use windows_sys::Win32::System::Registry::{RegGetValueW,HKEY_LOCAL_MACHINE,RRF_RT_REG_MULTI_SZ};
+    let source=if source.is_absolute(){source.to_path_buf()}else{std::env::current_dir()?.join(source)};
+    let value=wide(source.as_os_str());
+    if unsafe{MoveFileExW(value.as_ptr(),null(),MOVEFILE_DELAY_UNTIL_REBOOT)}==0{
+        return Err(std::io::Error::last_os_error()).context("无法登记重启后删除");
+    }
+    let key=wide(OsStr::new(r"SYSTEM\CurrentControlSet\Control\Session Manager"));
+    let name=wide(OsStr::new("PendingFileRenameOperations"));
+    let mut length=0;
+    let status=unsafe{RegGetValueW(HKEY_LOCAL_MACHINE,key.as_ptr(),name.as_ptr(),RRF_RT_REG_MULTI_SZ,null_mut(),null_mut(),&mut length)};
+    if status!=0{anyhow::bail!("读取重启删除登记失败：Windows 错误 {}",status);}
+    let mut data=vec![0u16;(length as usize+1)/2];
+    let status=unsafe{RegGetValueW(HKEY_LOCAL_MACHINE,key.as_ptr(),name.as_ptr(),RRF_RT_REG_MULTI_SZ,null_mut(),data.as_mut_ptr().cast(),&mut length)};
+    if status!=0{anyhow::bail!("核对重启删除登记失败：Windows 错误 {}",status);}
+    data.truncate(length as usize/2);
+    if !pending_delete_matches(&data,&source){anyhow::bail!("重启删除列表中未找到目标文件；加密副本已保留");}
+    Ok(())
 }
-
-fn repair_one_native(path:&Path)->String{
-    let value=wide(path.as_os_str());let attributes=unsafe{SetFileAttributesW(value.as_ptr(),FILE_ATTRIBUTE_NORMAL)};
-    let result=(||->Result<()> {
-        let administrators=well_known_sid(WinBuiltinAdministratorsSid)?;let system=well_known_sid(WinLocalSystemSid)?;
-        let trustee=|sid:&Vec<u8>|TRUSTEE_W{pMultipleTrustee:null_mut(),MultipleTrusteeOperation:NO_MULTIPLE_TRUSTEE,TrusteeForm:TRUSTEE_IS_SID,TrusteeType:TRUSTEE_IS_WELL_KNOWN_GROUP,ptstrName:sid.as_ptr().cast_mut().cast()};
-        let entries=[EXPLICIT_ACCESS_W{grfAccessPermissions:FILE_ALL_ACCESS,grfAccessMode:SET_ACCESS,grfInheritance:NO_INHERITANCE,Trustee:trustee(&administrators)},EXPLICIT_ACCESS_W{grfAccessPermissions:FILE_ALL_ACCESS,grfAccessMode:SET_ACCESS,grfInheritance:NO_INHERITANCE,Trustee:trustee(&system)}];
-        let mut acl:*mut ACL=null_mut();let built=unsafe{SetEntriesInAclW(entries.len()as u32,entries.as_ptr(),null(),&mut acl)};
-        if built!=0{anyhow::bail!("SetEntriesInAclW 返回 Windows 错误 {}",built);}
-        let applied=unsafe{SetNamedSecurityInfoW(value.as_ptr(),SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,administrators.as_ptr().cast_mut().cast(),null_mut(),acl,null())};
-        unsafe{LocalFree(acl as _)};
-        if applied!=0{anyhow::bail!("SetNamedSecurityInfoW 返回 Windows 错误 {}",applied);}Ok(())
-    })();
-    format!("{}：属性={}，原生所有权/DACL={}",path.display(),if attributes==0{"失败"}else{"成功"},match result{Ok(())=>"成功".into(),Err(error)=>format!("失败：{}",error)})
-}
-
-fn schedule_delete_after_reboot(source:&Path)->Result<()>{let source=wide(source.as_os_str());if unsafe{MoveFileExW(source.as_ptr(),null(),MOVEFILE_DELAY_UNTIL_REBOOT)}==0{return Err(std::io::Error::last_os_error()).context("无法登记重启后删除");}Ok(())}
 
 pub fn export_report(path: &Path, findings: &[Finding]) -> Result<()> {
     let parent=path.parent().context("报告输出路径无父目录")?;
@@ -228,6 +225,38 @@ pub fn export_report(path: &Path, findings: &[Finding]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_retries_until_third_attempt_and_stops_on_success(){
+        let cancel=std::sync::atomic::AtomicBool::new(false);
+        let mut calls=0;let mut retries=Vec::new();
+        delete_with_retries(&cancel,||{calls+=1;if calls<3{Err(std::io::Error::from_raw_os_error(32))}else{Ok(())}},|attempt,_|retries.push(attempt)).unwrap();
+        assert_eq!(calls,3);assert_eq!(retries,vec![1,2]);
+        let mut calls=0;
+        delete_with_retries(&cancel,||{calls+=1;Ok(())},|_,_|panic!("successful deletion must not retry")).unwrap();
+        assert_eq!(calls,1);
+    }
+
+    #[test]
+    fn deletion_exhausts_three_attempts_and_honors_cancellation(){
+        let cancel=std::sync::atomic::AtomicBool::new(false);
+        let mut calls=0;let mut retries=Vec::new();
+        assert!(delete_with_retries(&cancel,||{calls+=1;Err(std::io::Error::from_raw_os_error(32))},|attempt,_|retries.push(attempt)).is_err());
+        assert_eq!(calls,3);assert_eq!(retries,vec![1,2]);
+        cancel.store(true,std::sync::atomic::Ordering::Release);
+        assert!(delete_with_retries(&cancel,||panic!("cancelled cleanup must not delete"),|_,_|{}).is_err());
+        cancel.store(false,std::sync::atomic::Ordering::Release);
+        delete_with_retries(&cancel,||Err(std::io::Error::from(std::io::ErrorKind::NotFound)),|_,_|panic!("missing file is already deleted")).unwrap();
+    }
+
+    #[test]
+    fn pending_delete_parser_preserves_empty_destination_pairs(){
+        let entries="\\??\\C:\\first.exe\0\0\\??\\C:\\rename.exe\0\\??\\C:\\renamed.exe\0\\??\\C:\\sample.exe\0\0\0".encode_utf16().collect::<Vec<_>>();
+        assert!(pending_delete_matches(&entries,Path::new(r"C:\FIRST.exe")));
+        assert!(pending_delete_matches(&entries,Path::new(r"\\?\C:\sample.exe")));
+        assert!(!pending_delete_matches(&entries,Path::new(r"C:\rename.exe")));
+        assert!(!pending_delete_matches(&entries,Path::new(r"C:\other.exe")));
+    }
 
     #[test]
     fn recognizes_only_the_quarantine_subtree() {
