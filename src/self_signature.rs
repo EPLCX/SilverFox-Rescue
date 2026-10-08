@@ -7,23 +7,6 @@ const MAGIC: &[u8; 8] = b"SFXSIG01";
 const SLOT_SIZE: usize = 128;
 const DOMAIN: &[u8] = b"SilverFoxRescue/PE-self-sign/v1\0";
 pub(crate) const ENGINE_DOMAIN: &[u8] = b"SilverFoxRescue/PE-engine-sign/v1\0";
-const PUBLIC_KEY_HEX: &str = match option_env!("SILVERFOX_PROGRAM_PUBLIC_KEY_HEX") {
-    Some(value) => value,
-    None => "",
-};
-
-// The publisher fills the digest and signature after linking. Referencing this
-// static at startup also keeps its dedicated PE section from being discarded.
-#[used]
-#[link_section = ".sfsig"]
-static SIGNATURE_SLOT: [u8; SLOT_SIZE] = {
-    let mut bytes = [0; SLOT_SIZE];
-    bytes[0] = b'S'; bytes[1] = b'F'; bytes[2] = b'X'; bytes[3] = b'S';
-    bytes[4] = b'I'; bytes[5] = b'G'; bytes[6] = b'0'; bytes[7] = b'1';
-    bytes[8] = 1;
-    bytes
-};
-
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?))
 }
@@ -75,10 +58,6 @@ fn signed_message(bytes: &[u8], offset: usize, domain: &[u8]) -> Vec<u8> {
     message
 }
 
-pub fn verify_bytes(bytes: &[u8], public_key: &[u8]) -> Result<()> {
-    verify_with_domain(bytes, public_key, DOMAIN)
-}
-
 pub(crate) fn engine_version_hint(bytes: &[u8]) -> Option<&str> {
     let offset = signature_offset(bytes).ok()??;
     let slot = bytes.get(offset..offset + SLOT_SIZE)?;
@@ -116,58 +95,13 @@ pub(crate) fn verify_with_domain(bytes: &[u8], public_key: &[u8], domain: &[u8])
 
 pub(crate) fn verify_project_signed_bytes(bytes: &[u8], current_rule_version: &str) -> bool {
     if bytes.get(..2) != Some(b"MZ") { return false; }
-    let section = match signature_offset(bytes) { Ok(value) => value, Err(_) => return false };
-    if let Some(offset) = section {
-        if bytes[offset + 8] == 1 {
-            if let Ok(program_key) = hex::decode(PUBLIC_KEY_HEX) {
-                if verify_bytes(bytes, &program_key).is_ok() { return true; }
-            }
-        }
-    }
     let version = crate::updater::engine_version_hint(bytes).unwrap_or(current_rule_version);
     crate::updater::verify_engine_bytes(bytes, version).is_ok()
-}
-
-pub fn verify_current() -> Result<()> {
-    // Source builds without a program signing key are runnable offline. Builds
-    // configured for signed distribution still verify before any entry point.
-    if PUBLIC_KEY_HEX.is_empty() { return Ok(()); }
-    // Keep the section referenced even when whole-program optimization is on.
-    std::hint::black_box(std::ptr::addr_of!(SIGNATURE_SLOT));
-    let public_key = hex::decode(PUBLIC_KEY_HEX).context("程序签名公钥未配置")?;
-    let path = std::env::current_exe().context("无法定位当前程序")?;
-    let bytes = std::fs::read(&path).with_context(|| format!("无法读取当前程序 {}", path.display()))?;
-    verify_bytes(&bytes, &public_key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rejects_unsigned_or_malformed_image() {
-        assert!(verify_bytes(b"not a PE", &[0; 32]).is_err());
-        let mut bytes = vec![0u8; 1024];
-        bytes[..2].copy_from_slice(b"MZ");
-        bytes[0x3c..0x40].copy_from_slice(&128u32.to_le_bytes());
-        bytes[128..132].copy_from_slice(b"PE\0\0");
-        assert!(verify_bytes(&bytes, &[0; 32]).is_err());
-    }
-
-    #[test]
-    fn signed_release_fixture_rejects_byte_and_signature_changes() {
-        if PUBLIC_KEY_HEX.is_empty() { return; }
-        let Ok(path) = std::env::var("SILVERFOX_SELF_SIGNED_TEST_EXE") else { return; };
-        let key = hex::decode(PUBLIC_KEY_HEX).unwrap();
-        let mut bytes = std::fs::read(path).unwrap();
-        verify_bytes(&bytes, &key).unwrap();
-        let offset = signature_offset(&bytes).unwrap().unwrap();
-        bytes[offset + 44] ^= 1;
-        assert!(verify_bytes(&bytes, &key).is_err());
-        bytes[offset + 44] ^= 1;
-        *bytes.last_mut().unwrap() ^= 1;
-        assert!(verify_bytes(&bytes, &key).is_err());
-    }
 
     #[test]
     fn project_exemption_requires_an_intact_engine_signature() {

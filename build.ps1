@@ -57,41 +57,14 @@ try {
     if ([string]::IsNullOrWhiteSpace($clientVersion)) { throw 'Client version missing.' }
     $versionedExe = Join-Path $output "silverfox-rescue-$clientVersion.exe"
     $targetRoot = $env:CARGO_TARGET_DIR
-    $unsigned = Join-Path $targetRoot 'release\silverfox-rescue.exe'
-    Copy-Item -LiteralPath (Join-Path $targetRoot 'x86_64-win7-windows-msvc\release\silverfox-rescue.exe') -Destination $unsigned -Force
-    $size = (Get-Item -LiteralPath $unsigned).Length
+    $builtExe = Join-Path $targetRoot 'release\silverfox-rescue.exe'
+    Copy-Item -LiteralPath (Join-Path $targetRoot 'x86_64-win7-windows-msvc\release\silverfox-rescue.exe') -Destination $builtExe -Force
+    $size = (Get-Item -LiteralPath $builtExe).Length
     if ($size -ge 50MB) { throw "Release is $size bytes and exceeds 50 MB" }
-    if ([string]::IsNullOrWhiteSpace($env:SILVERFOX_PROGRAM_PUBLIC_KEY_HEX)) {
-        $localExe = $versionedExe
-        Copy-Item -LiteralPath $unsigned -Destination $localExe -Force
-        Write-Host "Built offline source executable $localExe ($size bytes)."
-    } else {
-        $privatePath = Join-Path $releaseKeyRoot 'program-private.pem'
-        if (Test-Path -LiteralPath $privatePath) {
-            $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
-            if (-not (Test-Path -LiteralPath $python)) { $python = (Get-Command python -ErrorAction Stop).Source }
-            $localExe = $versionedExe
-            $signCode = @'
-import os, sys, hashlib
-from pathlib import Path
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from tools import sign_program
-public = Ed25519PublicKey.from_public_bytes(bytes.fromhex(os.environ['SILVERFOX_PROGRAM_PUBLIC_KEY_HEX']))
-secret = serialization.load_pem_private_key(Path(sys.argv[2]).read_bytes(), password=None)
-signed = sign_program.sign_bytes(Path(sys.argv[1]).read_bytes(), secret, public)
-sign_program.atomic_write(Path(sys.argv[3]), signed)
-sign_program.verify_pe(Path(sys.argv[3]).read_bytes(), public)
-print(f'Signed and verified {sys.argv[3]} ({len(signed)} bytes), SHA-256: {hashlib.sha256(signed).hexdigest()}')
-'@
-            & $python -B -c $signCode $unsigned $privatePath $localExe
-            if ($LASTEXITCODE -ne 0) { throw 'Program signing or verification failed.' }
-        } else {
-            throw "Release compiled with a program public key. Signing requires $privatePath. Unsigned output: $unsigned"
-        }
-    }
+    Copy-Item -LiteralPath $builtExe -Destination $versionedExe -Force
+    Write-Host "Built executable $versionedExe ($size bytes)."
     try { Copy-Item -LiteralPath $versionedExe -Destination (Join-Path $output 'silverfox-rescue.exe') -Force -ErrorAction Stop }
-    catch { Write-Host "Default executable could not be replaced. Signed version output: $versionedExe" }
+    catch { Write-Host "Default executable could not be replaced. Versioned output: $versionedExe" }
     $driverRoot = Join-Path $projectRoot 'driver'
     $driverPackage = Join-Path $targetRoot 'silverfox-driver\package'
     if (-not $buildDllRequested -and -not (Test-Path -LiteralPath $driverPackage -PathType Container)) {

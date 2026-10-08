@@ -2978,13 +2978,6 @@ fn main() {
         windows_sys::Win32::System::Diagnostics::Debug::SEM_NOOPENFILEERRORBOX,
     ); }
     let args: Vec<String> = std::env::args().collect();
-    let signature_diagnostic = args.get(1).map(String::as_str) == Some("--verify-self-signature");
-    if let Err(error) = self_signature::verify_current() {
-        if signature_diagnostic { eprintln!("程序签名校验失败：{error:#}"); }
-        else { unsafe { MessageBoxW(null_mut(),wide(&format!("程序签名校验失败，已阻止启动：\r\n{error:#}")).as_ptr(),wide("完整性校验失败").as_ptr(),MB_OK|MB_ICONERROR); } }
-        std::process::exit(9);
-    }
-    if signature_diagnostic { println!("程序签名有效"); return; }
     // This switch exists only in a debug build so the program-update screen can
     // be inspected against a forced production manifest without preparing it.
     // It is compiled out of release builds and never changes verification.

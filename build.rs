@@ -43,7 +43,6 @@ fn main(){
     if env::var("PROFILE").as_deref()==Ok("release"){
         let rule_key=env::var("SILVERFOX_RULE_PUBLIC_KEY_HEX").unwrap_or_else(|_|std::fs::read_to_string(root.join("rules/seed/rules-public.hex")).expect("embedded rule public key missing"));let rule_key=rule_key.trim();assert!(rule_key.len()==64&&rule_key.bytes().all(|c|c.is_ascii_hexdigit()),"rule public key must be 32 bytes of hex");
         let engine=std::fs::read(root.join("engine/algorithms.dll")).expect("signed algorithms.dll is required for release");let engine_manifest:serde_json::Value=serde_json::from_slice(&std::fs::read(root.join("rules/seed/rules.manifest.json")).expect("signed embedded engine manifest is required")).expect("embedded engine manifest is malformed");let version=engine_manifest["version"].as_str().expect("embedded engine version missing");verify_embedded_engine_section(&engine,version,&hex::decode(rule_key).expect("rule public key encoding invalid"));
-        println!("cargo:rustc-link-arg-bin=silverfox-rescue=/SECTION:.sfsig,R");
         if env::var("SILVERFOX_BENCHMARK_BUILD").as_deref()!=Ok("1"){println!("cargo:rustc-link-arg-bin=silverfox-rescue=/MANIFEST:EMBED");println!("cargo:rustc-link-arg-bin=silverfox-rescue=/MANIFESTUAC:level='requireAdministrator' uiAccess='false'");println!("cargo:rustc-link-arg-bin=silverfox-rescue=/MANIFESTINPUT:{}",manifest.display());}
     }
 }

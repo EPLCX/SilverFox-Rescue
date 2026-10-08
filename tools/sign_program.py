@@ -12,9 +12,9 @@ import zipfile
 from pathlib import Path
 
 if __package__:
-    from .tool_paths import CLOUD_URL, DIST_DIR, ENGINE_DLL, KEY_DIR, ROOT, RULE_SEED_DIR, TARGET_ROOT
+    from .tool_paths import CLOUD_URL, DIST_DIR, ENGINE_DLL, KEY_DIR, ROOT, RULE_SEED_DIR
 else:
-    from tool_paths import CLOUD_URL, DIST_DIR, ENGINE_DLL, KEY_DIR, ROOT, RULE_SEED_DIR, TARGET_ROOT
+    from tool_paths import CLOUD_URL, DIST_DIR, ENGINE_DLL, KEY_DIR, ROOT, RULE_SEED_DIR
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -22,7 +22,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 SECTION = b".sfsig\0\0"
 MAGIC = b"SFXSIG01"
-PROGRAM_DOMAIN = b"SilverFoxRescue/PE-self-sign/v1\0"
 ENGINE_DOMAIN = b"SilverFoxRescue/PE-engine-sign/v1\0"
 SLOT_SIZE = 128
 
@@ -76,21 +75,17 @@ def engine_version(data: bytes, offset: int) -> str:
     return value
 
 
-def signed_message(data: bytes, offset: int, kind: str = "program", version: str | None = None) -> tuple[bytes, bytes]:
+def signed_message(data: bytes, offset: int, kind: str = "engine", version: str | None = None) -> tuple[bytes, bytes]:
     digest = hashlib.sha256(data[:offset] + bytes(SLOT_SIZE) + data[offset + SLOT_SIZE:]).digest()
-    if kind == "program":
-        domain = PROGRAM_DOMAIN
-    elif kind == "engine" and version and version.isascii() and len(version) <= 128:
+    if kind == "engine" and version and version.isascii() and len(version) <= 128:
         domain = ENGINE_DOMAIN + version.encode("ascii") + b"\0"
     else:
         raise ValueError("engine signing requires a short ASCII rule version")
     return domain + struct.pack("<Q", len(data)) + digest, digest
 
 
-def verify(data: bytes, public_key: Ed25519PublicKey, kind: str = "program", version: str | None = None) -> None:
+def verify(data: bytes, public_key: Ed25519PublicKey, kind: str = "engine", version: str | None = None) -> None:
     offset = signature_offset(data)
-    if kind == "program" and data[offset + 8] != 1:
-        raise ValueError("engine signature is not a program signature")
     if kind == "engine" and data[offset + 8] == 2:
         embedded = engine_version(data, offset)
         if version is not None and embedded != version:
@@ -99,12 +94,12 @@ def verify(data: bytes, public_key: Ed25519PublicKey, kind: str = "program", ver
     message, digest = signed_message(data, offset, kind, version)
     slot = data[offset:offset + SLOT_SIZE]
     if slot[12:44] != digest:
-        raise ValueError("program digest mismatch")
+        raise ValueError("engine digest mismatch")
     public_key.verify(slot[44:108], message)
 
 
 def sign_bytes(data: bytes, key: Ed25519PrivateKey, public_key: Ed25519PublicKey,
-               kind: str = "program", version: str | None = None) -> bytes:
+               kind: str = "engine", version: str | None = None) -> bytes:
     derived = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     expected = public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     if derived != expected:
@@ -119,8 +114,6 @@ def sign_bytes(data: bytes, key: Ed25519PrivateKey, public_key: Ed25519PublicKey
         data[offset + 108] = len(version)
         data[offset + 109:offset + 109 + len(version)] = version.encode("ascii")
         data = bytes(data)
-    elif data[offset + 8] != 1:
-        raise ValueError("program signature slot must use schema 1")
     message, digest = signed_message(data, offset, kind, version)
     signed = bytearray(data)
     signed[offset + 12:offset + 44] = digest
@@ -202,30 +195,28 @@ def confirm_replace(target: Path) -> bool:
     return not target.exists() or ask(f"{target} 已存在，覆盖？输入 yes 确认", "no").lower() == "yes"
 
 
-def sign_pe(kind: str) -> None:
-    public, secret = key_pair("program" if kind == "program" else "rules", private=True)
-    source = path("待签名文件", TARGET_ROOT / "release/silverfox-rescue.exe" if kind == "program" else ENGINE_DLL)
-    target = path("签名输出文件", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.exe" if kind == "program" else ENGINE_DLL)
-    version = ask("规则版本", default_rule_version()) if kind == "engine" else None
-    signed = sign_bytes(source.read_bytes(), secret, public, kind, version)
+def sign_pe() -> None:
+    public, secret = key_pair("rules", private=True)
+    source = path("待签名 DLL", ENGINE_DLL)
+    target = path("签名 DLL 输出", ENGINE_DLL)
+    version = ask("规则版本", default_rule_version())
+    signed = sign_bytes(source.read_bytes(), secret, public, "engine", version)
     atomic_write(target, signed)
     print(f"签名完成：{target}\nSHA-256: {hashlib.sha256(signed).hexdigest()}")
 
 
-def verify_signed_pe(kind: str) -> None:
-    public, _ = key_pair("program" if kind == "program" else "rules")
-    file = path("签名文件", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.exe" if kind == "program" else ENGINE_DLL)
-    version = ask("规则版本", default_rule_version()) if kind == "engine" else None
-    verify_pe(file.read_bytes(), public, kind, version)
+def verify_signed_pe() -> None:
+    public, _ = key_pair("rules")
+    file = path("签名 DLL", ENGINE_DLL)
+    version = ask("规则版本", default_rule_version())
+    verify_pe(file.read_bytes(), public, "engine", version)
     print(f"签名有效：{file}")
 
 
 def package_program() -> None:
-    public, _ = key_pair("program")
-    executable = path("已签名 EXE", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.exe")
+    executable = path("待打包 EXE", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.exe")
     package = path("程序 ZIP 输出", DIST_DIR / f"silverfox-rescue-{PROGRAM_VERSION}.zip")
     content = executable.read_bytes()
-    verify_pe(content, public, "program")
     if not confirm_replace(package):
         print("已取消。")
         return
@@ -308,13 +299,11 @@ def verify_program_manifest() -> None:
 
 
 MENU = {
-    "1": ("签名 EXE", lambda: sign_pe("program")),
-    "2": ("签名 DLL", lambda: sign_pe("engine")),
+    "2": ("签名 DLL", sign_pe),
     "3": ("生成并签名规则 ZIP／清单", publish_rule_package),
-    "4": ("将已签名 EXE 打包为程序 ZIP", package_program),
+    "4": ("将 EXE 打包为程序 ZIP", package_program),
     "5": ("生成程序更新签名清单", publish_program_manifest),
-    "6": ("验证 EXE", lambda: verify_signed_pe("program")),
-    "7": ("验证 DLL", lambda: verify_signed_pe("engine")),
+    "7": ("验证 DLL", verify_signed_pe),
     "8": ("验证规则 ZIP／清单／DLL", verify_rule_package),
     "9": ("验证程序更新 ZIP／清单", verify_program_manifest),
 }
