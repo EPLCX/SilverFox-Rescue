@@ -1,6 +1,46 @@
 use std::{env,path::PathBuf};
 use sha2::{Digest,Sha256};
 
+// Schema 3: headers plus raw sections; Authenticode metadata and overlay are excluded.
+fn section_digest(bytes: &[u8], offset: usize) -> Option<([u8; 32], u64)> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?));
+    let pe = u32_at(0x3c)? as usize;
+    let count = u16_at(pe.checked_add(6)?)? as usize;
+    let optional_size = u16_at(pe.checked_add(20)?)? as usize;
+    let optional = pe.checked_add(24)?;
+    let table = optional.checked_add(optional_size)?;
+    let end = table.checked_add(count.checked_mul(40)?)?;
+    let directory = match u16_at(optional)? { 0x10b => 96, 0x20b => 112, _ => return None };
+    if optional_size < directory { return None; }
+    let mut headers = bytes.get(..end)?.to_vec();
+    headers.get_mut(optional + 64..optional + 68)?.fill(0);
+    if u32_at(optional + directory - 4)? >= 5 {
+        if optional_size < directory + 40 { return None; }
+        headers.get_mut(optional + directory + 32..optional + directory + 40)?.fill(0);
+    }
+    let mut hash = Sha256::new();
+    hash.update(&headers);
+    let mut covered = end as u64;
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(count);
+    for index in 0..count {
+        let h = table + index * 40;
+        let size = u32_at(h + 16)? as usize;
+        if size == 0 { continue; }
+        let start = u32_at(h + 20)? as usize;
+        let stop = start.checked_add(size)?;
+        if start < end || stop > bytes.len() || ranges.iter().any(|&(a, b)| start < b && a < stop) { return None; }
+        ranges.push((start, stop));
+        if start <= offset && offset.checked_add(128)? <= stop {
+            hash.update(&bytes[start..offset]);
+            hash.update([0u8; 128]);
+            hash.update(&bytes[offset + 128..stop]);
+        } else { hash.update(&bytes[start..stop]); }
+        covered += size as u64;
+    }
+    Some((hash.finalize().into(), covered))
+}
+
 fn verify_embedded_engine_section(engine:&[u8],version:&str,key:&[u8]){
     assert!(engine.len()>=0x40 && &engine[..2]==b"MZ","embedded engine DOS header invalid");
     let pe=u32::from_le_bytes(engine[0x3c..0x40].try_into().unwrap())as usize;
@@ -20,14 +60,18 @@ fn verify_embedded_engine_section(engine:&[u8],version:&str,key:&[u8]){
     }
     let offset=offset.expect("embedded engine signature section missing");let slot=&engine[offset..offset+128];
     assert_eq!(&slot[..8],b"SFXSIG01","embedded engine signature magic invalid");
-    assert_eq!(&slot[8..12],&[2,0,0,0],"embedded engine signature schema invalid");
+    assert!(matches!(slot[8],2|3)&&slot[9..12]==[0;3],"embedded engine signature schema invalid");
     let version_len=slot[108]as usize;
     assert!(version_len>0&&version_len<=19,"embedded engine signature version length invalid");
     assert_eq!(&slot[109..109+version_len],version.as_bytes(),"embedded engine signature version mismatch");
     assert!(slot[109+version_len..].iter().all(|byte|*byte==0),"embedded engine signature padding invalid");
-    let mut hash=Sha256::new();hash.update(&engine[..offset]);hash.update([0u8;128]);hash.update(&engine[offset+128..]);let digest=hash.finalize();
+    let (digest,covered)=if slot[8]==3 {
+        section_digest(engine,offset).expect("embedded engine section digest invalid")
+    }else{
+        let mut hash=Sha256::new();hash.update(&engine[..offset]);hash.update([0u8;128]);hash.update(&engine[offset+128..]);(hash.finalize().into(),engine.len()as u64)
+    };
     assert_eq!(&slot[12..44],digest.as_slice(),"embedded engine digest mismatch");
-    let mut message=b"SilverFoxRescue/PE-engine-sign/v1\0".to_vec();message.extend_from_slice(version.as_bytes());message.push(0);message.extend_from_slice(&(engine.len()as u64).to_le_bytes());message.extend_from_slice(&digest);
+    let mut message=b"SilverFoxRescue/PE-engine-sign/v1\0".to_vec();message.extend_from_slice(version.as_bytes());message.push(0);message.extend_from_slice(&covered.to_le_bytes());message.extend_from_slice(&digest);
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519,key).verify(&message,&slot[44..108]).expect("embedded engine signature invalid");
 }
 fn main(){
