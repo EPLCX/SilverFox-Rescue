@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import argparse
 import ctypes
 import hashlib
@@ -273,8 +274,8 @@ def safe_categories(path: Path, data: bytes, catalog: dict) -> tuple[str, ...]:
     return tuple(classify(path, data)["categories"])
 
 
-def load_samples(dataset: Path, safe_catalog: dict | None = None, *, feature_extractor=extract_features, valid_pe_index=267) -> tuple[list[Sample], list[dict[str, object]]]:
-    definitions = [("safe", 0), ("others-virus", 1), ("virus", 1)]
+def load_samples(dataset: Path, safe_catalog: dict | None = None, *, feature_extractor=extract_features, valid_pe_index=267, exclude_others_virus=False, extraction_workers=2) -> tuple[list[Sample], list[dict[str, object]]]:
+    definitions = [("safe", 0), ("virus", 1)] if exclude_others_virus else [("safe", 0), ("others-virus", 1), ("virus", 1)]
     samples: list[Sample] = []
     skipped: list[dict[str, object]] = []
     metadata_function(ENGINE_DLL)
@@ -300,13 +301,15 @@ def load_samples(dataset: Path, safe_catalog: dict | None = None, *, feature_ext
             return Sample(path, label, family, size, group, features, categories), None
         except (OSError, ValueError) as error:
             return None, {"path": str(path), "reason": f"read_error:{error}"}
+        finally:
+            gc.collect()
     for family, label in definitions:
         root = dataset / family
         if not root.is_dir():
             raise FileNotFoundError(f"missing class directory: {root}")
         paths = sorted(path for path in root.rglob("*") if path.is_file())
         tasks = ((path, root, family, label) for path in paths)
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
             for position, (sample, reason) in enumerate(executor.map(read_one, tasks), 1):
                 if sample is not None: samples.append(sample)
                 if reason is not None: skipped.append(reason)

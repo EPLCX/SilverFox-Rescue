@@ -638,9 +638,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_PAGE_QUEUE_READY => { drain_page_queue(hwnd); 0 }
         WM_STARTUP_CONNECTION_FAILED => {
             if let Some(error)=STARTUP_CONNECTION_ERROR.get(){
+                audit::record("startup_error",error);
+                // Show the error before WM_DESTROY posts WM_QUIT, which can end
+                // the message box's modal loop before the user sees it.
+                MessageBoxW(hwnd,wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}\r\n\r\n系统日期、时间不正确也会导致 HTTPS 证书验证失败，请检查并校准系统时间后重试。")).as_ptr(),wide("更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
                 state().allow_close.store(true,Ordering::SeqCst);
                 DestroyWindow(hwnd);
-                MessageBoxW(null_mut(),wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}")).as_ptr(),wide("更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
             }
             0
         }

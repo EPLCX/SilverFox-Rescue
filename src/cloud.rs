@@ -7,7 +7,9 @@ use std::{fs,io::Read,sync::OnceLock,time::Duration};
 
 pub fn https_agent()->anyhow::Result<&'static ureq::Agent>{
     static AGENT:OnceLock<ureq::Agent>=OnceLock::new();
-    Ok(AGENT.get_or_init(||ureq::AgentBuilder::new().user_agent("SilverFoxRescue/2026.09").try_proxy_from_env(false).timeout_connect(Duration::from_secs(3)).timeout_read(Duration::from_secs(8)).timeout_write(Duration::from_secs(8)).build()))
+    // The default rustls verifier checks public-root trust, hostname and validity.
+    // HTTPS-only also rejects redirect downgrades before sending an HTTP request.
+    Ok(AGENT.get_or_init(||ureq::AgentBuilder::new().https_only(true).user_agent("SilverFoxRescue/2026.09").try_proxy_from_env(false).timeout_connect(Duration::from_secs(3)).timeout_read(Duration::from_secs(8)).timeout_write(Duration::from_secs(8)).build()))
 }
 
 pub fn startup_connection_failure(error:&anyhow::Error,probe:impl FnOnce()->bool)->bool{
@@ -17,7 +19,7 @@ pub fn startup_connection_failure(error:&anyhow::Error,probe:impl FnOnce()->bool
 }
 
 pub fn internet_reachable()->bool{
-    let result=ureq::AgentBuilder::new().try_proxy_from_env(false)
+    let result=ureq::AgentBuilder::new().https_only(true).try_proxy_from_env(false)
         .timeout(Duration::from_secs(3)).redirects(0).build().get("https://1.1.1.1/").call();
     // An HTTP error response still proves that the HTTPS connection succeeded.
     matches!(result,Ok(_)|Err(ureq::Error::Status(_, _)))
@@ -107,7 +109,7 @@ impl CloudClient{
     pub fn download_program_package(&self,manifest:&ProgramManifest,destination:&std::path::Path)->Result<()> {
         let url=manifest.package_url.as_deref().context("程序更新清单缺少下载地址")?;
         let url=download_url(&self.base_url,url);
-        if !url.starts_with("https://")&&!url.starts_with("http://127.0.0.1"){anyhow::bail!("程序更新下载必须使用 HTTPS");}
+        if !url.starts_with("https://"){anyhow::bail!("程序更新下载必须使用 HTTPS");}
         let reader=https_agent()?.get(&url).call().context("程序更新包下载失败")?.into_reader();
         let mut bytes=Vec::new();reader.take(256*1024*1024).read_to_end(&mut bytes).context("读取程序更新包失败")?;
         if bytes.len()==256*1024*1024{anyhow::bail!("程序更新包超过 256 MiB");}

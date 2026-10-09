@@ -241,7 +241,7 @@ pub fn update(base_url:&str)->Result<String>{
     }
     let url=manifest.url.clone().context("清单缺少下载地址")?;
     let url=crate::cloud::download_url(base_url,&url);
-    if !url.starts_with("https://") && !base_url.starts_with("http://127.0.0.1") { anyhow::bail!("规则下载必须使用 HTTPS"); }
+    if !url.starts_with("https://") { anyhow::bail!("规则下载必须使用 HTTPS"); }
     let reader=crate::cloud::https_agent()?.get(&url).call().context("规则下载失败")?.into_reader();let mut bytes=Vec::new();reader.take(8*1024*1024).read_to_end(&mut bytes)?;
     install_verified_package(&bytes,&manifest)?;
     set_current_rule_version(&manifest.version);

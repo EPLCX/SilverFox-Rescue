@@ -594,6 +594,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=os.environ.get("SILVERFOX_DATASET_DIR"),
                         required=not bool(os.environ.get("SILVERFOX_DATASET_DIR")))
+    parser.add_argument("--exclude-others-virus", action="store_true",
+                        help="exclude the others-virus directory before reading samples")
+    parser.add_argument("--extraction-workers", type=int, choices=range(1, 17), default=2,
+                        help="feature extraction threads; use 1 to reduce peak memory")
     parser.add_argument("--header", type=Path, default=MODEL_HEADER)
     parser.add_argument("--report", type=Path, default=MODEL_REPORT)
     parser.add_argument("--booster-out", type=Path, default=MODEL_DIR / "static_ml_booster.txt")
@@ -614,7 +618,9 @@ def main():
         raise RuntimeError("DLL lacks corrected overlay extractor; run engine/build-engine.bat or specify --engine")
     safe_catalog = load_safe_catalog(args.safe_classification)
     samples, skipped = load_samples(args.dataset, safe_catalog, feature_extractor=extract_feature_vector,
-                                    valid_pe_index=FEATURE_NAMES.index("valid_pe"))
+                                    valid_pe_index=FEATURE_NAMES.index("valid_pe"),
+                                    exclude_others_virus=args.exclude_others_virus,
+                                    extraction_workers=args.extraction_workers)
     samples.extend(load_extra_safe(args.extra_safe, safe_catalog, feature_extractor=extract_feature_vector,
                                    valid_pe_index=FEATURE_NAMES.index("valid_pe")))
     samples, conflicts = remove_conflicting_duplicates(samples)
@@ -624,7 +630,8 @@ def main():
                        if sample.family.startswith("virus/") and sample.family != "virus/Generic"})
     if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]*", name) for name in families):
         raise RuntimeError("family directory names must be safe ASCII identifiers")
-    classes = ["Safe", "Generic", *families]
+    generic_present = any(sample.label != 0 and (not sample.family.startswith("virus/") or sample.family == "virus/Generic") for sample in samples)
+    classes = ["Safe", *(["Generic"] if generic_present else []), *families]
     class_index = {name: index for index, name in enumerate(classes)}
     labels = ["Safe" if sample.label == 0 else
               sample.family.split("/", 1)[1] if sample.family.startswith("virus/") else "Generic"
@@ -635,7 +642,8 @@ def main():
     groups = np.asarray([sample.group for sample in samples])
     focus = np.asarray([sample.family.startswith("virus/") for sample in samples])
     counts = np.bincount(y, minlength=len(classes))
-    weights = np.asarray([1.0 if label == 0 else min(12.0, max(1.0, math.sqrt(counts[1]/max(counts[label], 1))))
+    generic_count = counts[class_index["Generic"]] if generic_present else 0
+    weights = np.asarray([1.0 if label == 0 else min(12.0, max(1.0, math.sqrt(generic_count/max(counts[label], 1))))
                           for label in y], np.float64)
     weights[focus] *= 2.0
     print(json.dumps({"sample_count": len(y), "classes": dict(zip(classes, map(int, counts))),
@@ -730,6 +738,7 @@ def main():
         "dataset": str(args.dataset), "feature_count": len(FEATURE_NAMES), "feature_names": FEATURE_NAMES,
         "feature_importance_gain": dict(zip(FEATURE_NAMES, map(float, final.booster_.feature_importance(importance_type="gain")))),
         "extra_safe_paths": [str(path) for path in args.extra_safe],
+        "excluded_dataset_categories": ["others-virus"] if args.exclude_others_virus else [],
         "class_names": classes, "class_counts": dict(zip(classes, map(int, counts))),
         "sample_count": len(y), "final_fit_count": len(y), "virus_pe_samples": int(focus.sum()),
         "tree_count": len(tree[0]), "node_count": len(tree[3]), "supported_input": "valid_pe_only",
@@ -738,6 +747,7 @@ def main():
         "group_audit": group_audit,
         "feature_extractor": {"engine": str(static_ml.ENGINE_DLL),
                               "schema_version": SCHEMA_VERSION,
+                              "workers": args.extraction_workers,
                               "byte_statistics": "original bytes; 16 byte buckets, 256 EMBER entropy bins, separate padding/nonzero statistics",
                               "pe_metadata": "original bytes and original total size",
                               "overlay": "exclude structurally validated WIN_CERTIFICATE regions"},
@@ -754,7 +764,7 @@ def main():
                     "group": s.group, "safe_categories": list(s.safe_categories)} for s in samples]
     if args.evaluate:
         predicted_family = outer_classes[:, 1:].argmax(axis=1) + 1
-        named = y > 1
+        named = np.asarray([classes[int(label)] not in ("Safe", "Generic") for label in y])
         report["safe_classification"].update(safe_strata=safe_strata,
             category_metrics=safe_category_metrics(samples, groups, dev_probability, suspicious, malicious))
         report["calibration"].update(C=1e6, raw_brier=float(brier_score_loss(binary, full_oof_raw)),
