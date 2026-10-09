@@ -817,7 +817,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_MOUSEWHEEL => {let delta=((w>>16)&0xffff)as i16;if state().ui_mode.load(Ordering::Acquire)==2 {scroll_results(hwnd,-delta as f64/120.0*(112*dpi::window_dpi(hwnd).max(96)/96)as f64,delta.unsigned_abs()>=120);}else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let max=list.lines.len().saturating_sub(1);list.scroll=if delta<0{(list.scroll+1).min(max)}else{list.scroll.saturating_sub(1)};InvalidateRect(hwnd,null(),0);}0 }
         WM_KEYDOWN => {
             if w==VK_TAB as usize{move_virtual_focus(hwnd,GetKeyState(VK_SHIFT as i32)<0);return 0;}
-            if VIRTUAL_MENU_OPEN&&w==VK_ESCAPE as usize{VIRTUAL_MENU_OPEN=false;VIRTUAL_FOCUS=ID_MORE;InvalidateRect(hwnd,null(),0);return 0;}
+            if VIRTUAL_MENU_OPEN&&w==VK_ESCAPE as usize{VIRTUAL_MENU_OPEN=false;set_virtual_focus(hwnd,ID_MORE);return 0;}
             if VIRTUAL_MENU_OPEN&&(w==VK_UP as usize||w==VK_DOWN as usize){let current=MENU_IDS.iter().position(|id|*id==VIRTUAL_FOCUS);let next=match current{Some(current)if w==VK_UP as usize=>(current+MENU_IDS.len()-1)%MENU_IDS.len(),Some(current)=>(current+1)%MENU_IDS.len(),None if w==VK_UP as usize=>MENU_IDS.len()-1,None=>0};set_virtual_focus(hwnd,MENU_IDS[next]);return 0;}
             if directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
                 if w==VK_ESCAPE as usize{set_directory_input_active(hwnd,false);}
@@ -1882,7 +1882,7 @@ unsafe fn announce_scan_result(hwnd:HWND){
 
 unsafe fn show_more_menu(hwnd: HWND) {
     VIRTUAL_MENU_OPEN=true;
-    set_virtual_focus(hwnd,ID_MORE);
+    set_virtual_focus(hwnd,MENU_IDS[0]);
     InvalidateRect(hwnd,null(),0);
 }
 unsafe fn drain_page_queue(hwnd:HWND) {
