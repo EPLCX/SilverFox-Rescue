@@ -2,7 +2,7 @@ use crate::dpi;
 use std::sync::{Mutex,OnceLock};
 use windows_sys::Win32::{Foundation::{HWND,RECT},Graphics::Gdi::{CreatePen,CreateSolidBrush,DeleteObject,DrawTextW,FillRect,GetStockObject,InvalidateRect,Rectangle,SelectObject,SetBkMode,SetTextColor,HDC,DT_SINGLELINE,DT_VCENTER,NULL_BRUSH,PS_SOLID,TRANSPARENT},UI::{WindowsAndMessaging::GetClientRect}};
 use crate::settings::{self,Settings};
-const BLUE:u32=0x00FF7716;const INK:u32=0x00445566;const MUTED:u32=0x00798795;const PALE:u32=0x00F6F8FC;const BORDER:u32=0x00DEE5EE;
+const INK:u32=0x00445566;const MUTED:u32=0x00798795;const PALE:u32=0x00F6F8FC;const BORDER:u32=0x00DEE5EE;
 #[derive(Clone,Copy,PartialEq,Eq)]enum Focus{None,Gpu,Threads,Channel,HideControls}
 struct Page{value:Settings,threads:String,focus:Focus,replace_on_type:bool,message:String,rules_ready:bool}
 static PAGE:OnceLock<Mutex<Page>>=OnceLock::new();
@@ -23,12 +23,11 @@ pub unsafe fn paint(dc:HDC,client:&RECT,dpi:i32,show_text:bool){
     let gpu=match page.value.gpu.as_str(){"enabled"=>"启用","disabled"=>"禁用",_=>"自动"};
     let hidden=match page.value.hide_controls.as_str(){"enabled"=>"关闭","disabled"=>"开启",_=>"自动"};
     let values=[gpu,page.threads.as_str(),page.value.update_channel.as_str(),hidden];
-    let focuses=[Focus::Gpu,Focus::Threads,Focus::Channel,Focus::HideControls];
     for i in 0..4{
         fill(dc,ui.rows[i],0x00FFFFFF);
         if show_text{label(dc,ui.rows[i],names[i],INK);}
-        if crate::ui_rounding::enabled(){crate::ui_rounding::control(dc,ui.fields[i].rect(),0x00FFFFFF,Some(if page.focus==focuses[i]{BLUE}else{BORDER}),0x00FFFFFF,scale(4,dpi).max(1));}
-        else{fill(dc,ui.fields[i],0x00FFFFFF);outline(dc,ui.fields[i],if page.focus==focuses[i]{BLUE}else{BORDER});}
+        if crate::ui_rounding::enabled(){crate::ui_rounding::control(dc,ui.fields[i].rect(),0x00FFFFFF,Some(BORDER),0x00FFFFFF,scale(4,dpi).max(1));}
+        else{fill(dc,ui.fields[i],0x00FFFFFF);outline(dc,ui.fields[i],BORDER);}
         if show_text{label(dc,ui.fields[i],values[i],INK);}
     }
     fill(dc,ui.status,PALE);

@@ -49,7 +49,7 @@ use walkdir:: WalkDir;
 use windows_sys:: Win32:: {
     Foundation:: *, Graphics:: {
         Dwm::{DwmDefWindowProc,DwmExtendFrameIntoClientArea}, Gdi:: {
-        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawFocusRect, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, HALFTONE, InvalidateRect, LineTo, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MoveToEx, Rectangle, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, UpdateWindow, HBRUSH, HDC, HFONT, PAINTSTRUCT, COLOR_WINDOW, DEFAULT_CHARSET, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, NULL_BRUSH, PS_SOLID, SRCCOPY, TRANSPARENT
+        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, HALFTONE, InvalidateRect, LineTo, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MoveToEx, Rectangle, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, UpdateWindow, HBRUSH, HDC, HFONT, PAINTSTRUCT, COLOR_WINDOW, DEFAULT_CHARSET, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, NULL_BRUSH, PS_SOLID, SRCCOPY, TRANSPARENT
         }
     }
     , System:: {
@@ -206,6 +206,7 @@ struct VirtualPageList { lines:Vec<String>, selected:Option<usize>, scroll:usize
 static VIRTUAL_PAGE_LIST:OnceLock<Mutex<VirtualPageList>>=OnceLock::new();
 fn virtual_page_list()->&'static Mutex<VirtualPageList>{VIRTUAL_PAGE_LIST.get_or_init(||Mutex::new(VirtualPageList{lines:Vec::new(),selected:None,scroll:0}))}
 static mut VIRTUAL_FOCUS:usize=0;
+static mut KEYBOARD_FOCUS_VISIBLE:bool=false;
 static mut VIRTUAL_HOT:usize=0;
 static mut VIRTUAL_PRESSED:usize=0;
 static mut VIRTUAL_MENU_OPEN:bool=false;
@@ -228,17 +229,18 @@ fn blend_button_color(from:u32,to:u32,t:f32)->u32{
         result|((first+(last-first)*t).round()as u32)<<shift
     })
 }
-fn inner_button_focus_visible(focused:bool,accessibility:bool)->bool{focused&&accessibility}
+fn keyboard_focus_visible(focused:bool,keyboard:bool)->bool{focused&&keyboard}
 #[cfg(test)]
 #[test]
-fn button_animation_interpolates_and_normal_mode_has_no_inner_frame(){
+fn button_animation_interpolates_and_only_keyboard_shows_focus(){
     let start=Instant::now();
     let tone=ButtonTone{from:0x00FFFFFF,to:0x00F5F5F5,started:start};
     let middle=tone.color_at(start+Duration::from_millis(BUTTON_ANIMATION_MS/2));
     assert!(middle<0x00FFFFFF&&middle>0x00F5F5F5);
     assert_eq!(tone.color_at(start+Duration::from_millis(BUTTON_ANIMATION_MS)),0x00F5F5F5);
-    assert!(!inner_button_focus_visible(true,false));
-    assert!(inner_button_focus_visible(true,true));
+    assert!(!keyboard_focus_visible(true,false));
+    assert!(keyboard_focus_visible(true,true));
+    assert!(!keyboard_focus_visible(false,true));
 }
 static BUTTON_TONES:OnceLock<Mutex<HashMap<(isize,usize),ButtonTone>>>=OnceLock::new();
 fn button_tones()->&'static Mutex<HashMap<(isize,usize),ButtonTone>>{BUTTON_TONES.get_or_init(||Mutex::new(HashMap::new()))}
@@ -547,6 +549,8 @@ fn publish_findings(app:&AppState,findings:Vec<Finding>){
 fn requires_manual_selection(source:&str)->bool{source.starts_with("service-host-advisory:")}
 fn default_selected_indices()->HashSet<usize>{state().findings.lock().unwrap_or_else(|error|error.into_inner()).iter().enumerate().filter_map(|(index,finding)|(finding.verdict==Verdict::Malicious&&!requires_manual_selection(&finding.source)).then_some(index)).collect()}
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    let keyboard=if msg==WM_KEYDOWN{Some(true)}else if matches!(msg,WM_LBUTTONDOWN|WM_RBUTTONDOWN|WM_MBUTTONDOWN|WM_NCLBUTTONDOWN|WM_NCRBUTTONDOWN|WM_NCMBUTTONDOWN){Some(false)}else{None};
+    if let Some(keyboard)=keyboard{if KEYBOARD_FOCUS_VISIBLE!=keyboard{KEYBOARD_FOCUS_VISIBLE=keyboard;InvalidateRect(hwnd,null(),0);}}
     if msg==WM_GETOBJECT{trace_ui_provider(&format!("WM_GETOBJECT hwnd=0x{:x} wParam=0x{:x} lParam={} (0x{:x}) thread={}",hwnd as usize,w,l as i32,l as usize,windows_sys::Win32::System::Threading::GetCurrentThreadId()));}
     match msg {
         // WS_CAPTION supplies DWM's real frame, shadow and window animations.
@@ -612,7 +616,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             let accessible=refresh_accessible_text(false);
             if LAST_ACCESSIBLE_TEXT!=Some(accessible){
                 LAST_ACCESSIBLE_TEXT=Some(accessible);
-                if !accessible{VIRTUAL_FOCUS=0;if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{settings_ui::clear_focus(hwnd);}}
                 SetWindowTextW(hwnd,wide(if accessible{"银狐专杀急救箱"}else{""}).as_ptr());
                 apply_dpi_layout(hwnd,true);
                 InvalidateRect(hwnd,null(),0);
@@ -663,7 +666,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 let accessible=refresh_accessible_text(true);
                 if LAST_ACCESSIBLE_TEXT!=Some(accessible){
                     LAST_ACCESSIBLE_TEXT=Some(accessible);
-                    if !accessible{VIRTUAL_FOCUS=0;settings_ui::clear_focus(hwnd);}
                     SetWindowTextW(hwnd,wide(if accessible{"银狐专杀急救箱"}else{""}).as_ptr());
                     apply_dpi_layout(hwnd,true);
                 }
@@ -814,7 +816,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
         WM_MOUSEWHEEL => {let delta=((w>>16)&0xffff)as i16;if state().ui_mode.load(Ordering::Acquire)==2 {scroll_results(hwnd,-delta as f64/120.0*(112*dpi::window_dpi(hwnd).max(96)/96)as f64,delta.unsigned_abs()>=120);}else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let max=list.lines.len().saturating_sub(1);list.scroll=if delta<0{(list.scroll+1).min(max)}else{list.scroll.saturating_sub(1)};InvalidateRect(hwnd,null(),0);}0 }
         WM_KEYDOWN => {
-            if w==VK_TAB as usize{if accessible_text_enabled(){move_virtual_focus(hwnd,GetKeyState(VK_SHIFT as i32)<0);}return 0;}
+            if w==VK_TAB as usize{move_virtual_focus(hwnd,GetKeyState(VK_SHIFT as i32)<0);return 0;}
             if VIRTUAL_MENU_OPEN&&w==VK_ESCAPE as usize{VIRTUAL_MENU_OPEN=false;VIRTUAL_FOCUS=ID_MORE;InvalidateRect(hwnd,null(),0);return 0;}
             if VIRTUAL_MENU_OPEN&&(w==VK_UP as usize||w==VK_DOWN as usize){let current=MENU_IDS.iter().position(|id|*id==VIRTUAL_FOCUS);let next=match current{Some(current)if w==VK_UP as usize=>(current+MENU_IDS.len()-1)%MENU_IDS.len(),Some(current)=>(current+1)%MENU_IDS.len(),None if w==VK_UP as usize=>MENU_IDS.len()-1,None=>0};set_virtual_focus(hwnd,MENU_IDS[next]);return 0;}
             if directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
@@ -825,6 +827,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             if w==VK_RETURN as usize||w==VK_SPACE as usize{
                 let focused=VIRTUAL_FOCUS;
+                if state().ui_mode.load(Ordering::Acquire)==2&&(ID_FINDING_FIRST..ID_FINDING_FIRST+FINDING_CONTROL_COUNT).contains(&focused){virtual_accessibility::handle_action(hwnd,focused,true);return 0;}
                 if [ID_SETTINGS_GPU,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY].contains(&focused){settings_ui::activate_focused(hwnd);return 0;}
                 if virtual_buttons(hwnd).iter().any(|(id,_)|*id==VIRTUAL_FOCUS){activate_virtual_button(hwnd,VIRTUAL_FOCUS);return 0;}
             }
@@ -1032,6 +1035,7 @@ unsafe fn paint_chrome(hwnd: HWND) {
     paint_page(dc, hwnd, &client, dpi);
     paint_virtual_controls(dc,hwnd,&client,dpi);
     paint_directory_input(dc,hwnd,&client,dpi);
+    paint_keyboard_focus(dc,hwnd,&client,dpi);
     if dc!=screen_dc{page_transition::blend(hwnd,dc);}
     if saved!=0{windows_sys::Win32::Graphics::Gdi::RestoreDC(memory_dc,saved);}
     if dc!=screen_dc{BitBlt(screen_dc,dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top,dc,dirty.left,dirty.top,SRCCOPY);}
@@ -1329,11 +1333,10 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
         return;
     }
     if matches!(id,ID_SETTINGS_GPU|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY){
-        let focused=item.itemState&ODS_FOCUS as u32!=0;
-        if ui_rounding::enabled(){ui_rounding::control(item.hDC,item.rcItem,0x00FFFFFF,Some(if focused{BLUE}else{0x00DEE5EE}),0x00FFFFFF,(4*dpi::window_dpi(item.hwndItem).max(96)as i32/96).max(1));}
+        if ui_rounding::enabled(){ui_rounding::control(item.hDC,item.rcItem,0x00FFFFFF,Some(0x00DEE5EE),0x00FFFFFF,(4*dpi::window_dpi(item.hwndItem).max(96)as i32/96).max(1));}
         else{
             let brush=CreateSolidBrush(0x00FFFFFF);FillRect(item.hDC,&item.rcItem,brush);DeleteObject(brush);
-            let pen=CreatePen(PS_SOLID,if focused{2}else{1},if focused{BLUE}else{0x00DEE5EE});
+            let pen=CreatePen(PS_SOLID,1,0x00DEE5EE);
             let old_pen=SelectObject(item.hDC,pen);let old_brush=SelectObject(item.hDC,GetStockObject(NULL_BRUSH));
             Rectangle(item.hDC,item.rcItem.left,item.rcItem.top,item.rcItem.right-1,item.rcItem.bottom-1);
             SelectObject(item.hDC,old_brush);SelectObject(item.hDC,old_pen);DeleteObject(pen);
@@ -1346,7 +1349,6 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
         if !UI_FONT.is_null(){SelectObject(item.hDC,UI_FONT);}
         let mut rect=item.rcItem;rect.left+=8;rect.right-=8;
         DrawTextW(item.hDC,wide(value).as_ptr(),-1,&mut rect,DT_VCENTER|DT_SINGLELINE);
-        if inner_button_focus_visible(focused,accessible_text_enabled()){let mut focus=item.rcItem;focus.left+=3;focus.top+=3;focus.right-=3;focus.bottom-=3;DrawFocusRect(item.hDC,&focus);}
         return;
     }
     let primary = id==ID_QUICK||id==ID_DONE||id==ID_CANCEL||id==ID_PAGE_ACTION;
@@ -1373,10 +1375,6 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
     let text=wide(&label);
     let mut rect = item.rcItem;
     DrawTextW(item.hDC,text.as_ptr(),(text.len()-1)as i32,&mut rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-    if inner_button_focus_visible(item.itemState&ODS_FOCUS as u32!=0,accessible_text_enabled()){
-        let focus=RECT{left:item.rcItem.left+4,top:item.rcItem.top+4,right:item.rcItem.right-4,bottom:item.rcItem.bottom-4};
-        DrawFocusRect(item.hDC,&focus);
-    }
 }
 
 unsafe fn virtual_buttons(hwnd:HWND)->Vec<(usize,RECT)>{
@@ -1462,8 +1460,10 @@ unsafe fn virtual_focus_order(hwnd:HWND)->Vec<usize>{
         }
     }
     let buttons=virtual_buttons(hwnd);
+    let findings=if mode==2{virtual_accessibility::items(hwnd).into_iter().filter(|item|item.role==windows_sys::Win32::UI::Accessibility::ROLE_SYSTEM_CHECKBUTTON).map(|item|item.id).collect::<Vec<_>>()}else{Vec::new()};
+    order.extend(findings.iter().copied());
     for (id,_) in &buttons{if !matches!(*id,ID_MINIMIZE|ID_CLOSE)&&!order.contains(id){order.push(*id);}}
-    order.retain(|id|buttons.iter().any(|(button,_)|button==id)||matches!(*id,ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|202));
+    order.retain(|id|buttons.iter().any(|(button,_)|button==id)||findings.contains(id)||matches!(*id,ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|202));
     order.extend([ID_MINIMIZE,ID_CLOSE]);
     order
 }
@@ -1524,11 +1524,30 @@ unsafe fn paint_virtual_controls(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
         if ui_rounding::enabled(){ui_rounding::control(dc,panel,0x00FFFFFF,Some(0x00D9E2F0),0x00FFFFFF,s(5).max(1));}
         else{let brush=CreateSolidBrush(0x00FFFFFF);FillRect(dc,&panel,brush);DeleteObject(brush);let pen=CreatePen(PS_SOLID,1,0x00D9E2F0);let old=SelectObject(dc,pen);let empty=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,panel.left,panel.top,panel.right,panel.bottom);SelectObject(dc,empty);SelectObject(dc,old);DeleteObject(pen);}
         let labels=["自定义扫描…","仅扫描进程","仅扫描服务","隔离区","扫描报告","更新规则","设置与状态"];
-        for (index,id) in MENU_IDS.iter().enumerate(){let row=RECT{left,top:top+index as i32*s(MENU_ROW_HEIGHT),right:left+menu_width,bottom:top+(index as i32+1)*s(MENU_ROW_HEIGHT)};let target=if VIRTUAL_FOCUS==*id||VIRTUAL_HOT==*id{0x00F3E7DE}else{0x00FFFFFF};let color=animated_button_color(hwnd,*id,target);if color!=0x00FFFFFF{if ui_rounding::enabled(){ui_rounding::control(dc,row,color,None,0x00FFFFFF,s(4).max(1));}else{let hot=CreateSolidBrush(color);FillRect(dc,&row,hot);DeleteObject(hot);}}SetTextColor(dc,0x00445566);let mut text=row;text.left+=s(12);DrawTextW(dc,wide(labels[index]).as_ptr(),-1,&mut text,DT_VCENTER|DT_SINGLELINE);}
+        for (index,id) in MENU_IDS.iter().enumerate(){let row=RECT{left,top:top+index as i32*s(MENU_ROW_HEIGHT),right:left+menu_width,bottom:top+(index as i32+1)*s(MENU_ROW_HEIGHT)};let target=if (KEYBOARD_FOCUS_VISIBLE&&VIRTUAL_FOCUS==*id)||VIRTUAL_HOT==*id{0x00F3E7DE}else{0x00FFFFFF};let color=animated_button_color(hwnd,*id,target);if color!=0x00FFFFFF{if ui_rounding::enabled(){ui_rounding::control(dc,row,color,None,0x00FFFFFF,s(4).max(1));}else{let hot=CreateSolidBrush(color);FillRect(dc,&row,hot);DeleteObject(hot);}}SetTextColor(dc,0x00445566);let mut text=row;text.left+=s(12);DrawTextW(dc,wide(labels[index]).as_ptr(),-1,&mut text,DT_VCENTER|DT_SINGLELINE);}
     }
 }
 
 
+
+unsafe fn paint_keyboard_focus(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
+    if !keyboard_focus_visible(VIRTUAL_FOCUS!=0,KEYBOARD_FOCUS_VISIBLE){return;}
+    let s=|value:i32|value*dpi/96;
+    let rect=if VIRTUAL_FOCUS==ID_DIRECTORY_INPUT&&directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
+        let width=(client.right-s(72)).max(s(360));let left=(client.right-width)/2;
+        Some(RECT{left:left+s(28),top:s(212),right:left+width-s(28),bottom:s(250)})
+    }else{virtual_accessibility::items(hwnd).into_iter().find(|item|item.id==VIRTUAL_FOCUS&&item.focusable).map(|item|item.rect)};
+    let Some(rect)=rect else{return;};
+    let gap=s(3).max(1);
+    let rect=RECT{left:rect.left-gap,top:rect.top-gap,right:rect.right+gap,bottom:rect.bottom+gap};
+    let pen=CreatePen(PS_SOLID,s(2).max(1),0x00000000);
+    let old_pen=SelectObject(dc,pen);let old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
+    if ui_rounding::enabled(){
+        let corner=s(14).max(2);
+        windows_sys::Win32::Graphics::Gdi::RoundRect(dc,rect.left,rect.top,rect.right,rect.bottom,corner,corner);
+    }else{Rectangle(dc,rect.left,rect.top,rect.right,rect.bottom);}
+    SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);
+}
 
 fn scan_status_summary()->String{
     if update_presentation_elapsed().is_some(){return "正在检查病毒库更新…".into();}
@@ -2766,7 +2785,6 @@ unsafe fn paint_directory_input(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
         if ui_rounding::enabled(){ui_rounding::control(dc,rect,color,Some(BLUE),0x00FFFFFF,s(4).max(1));}
         else{let brush=CreateSolidBrush(color);FillRect(dc,&rect,brush);DeleteObject(brush);let edge=CreatePen(PS_SOLID,1,BLUE);let previous=SelectObject(dc,edge);let clear=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,rect.left,rect.top,rect.right,rect.bottom);SelectObject(dc,clear);SelectObject(dc,previous);DeleteObject(edge);}
         SetTextColor(dc,text_color);let mut label_rect=rect;DrawTextW(dc,wide(label).as_ptr(),-1,&mut label_rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        if inner_button_focus_visible(VIRTUAL_FOCUS==id,accessible_text_enabled()){let focus=RECT{left:rect.left+s(3),top:rect.top+s(3),right:rect.right-s(3),bottom:rect.bottom-s(3)};DrawFocusRect(dc,&focus);}
     }
     SelectObject(dc,old_font);
 }
