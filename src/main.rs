@@ -739,7 +739,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_MOUSEMOVE => {
             let mut track=TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>()as u32,dwFlags:TME_LEAVE,hwndTrack:hwnd,dwHoverTime:0};TrackMouseEvent(&mut track);
             let (x,y)=point_from_lparam(l);
-            let next=virtual_button_at(hwnd,x,y);
+            let next=virtual_hover_at(hwnd,x,y);
             if next!=VIRTUAL_HOT{VIRTUAL_HOT=next;InvalidateRect(hwnd,null(),0);}
             0
         }
@@ -787,7 +787,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_LBUTTONUP => {
             let (x,y)=point_from_lparam(l);
             let released=virtual_button_at(hwnd,x,y);
-            VIRTUAL_HOT=released;
+            VIRTUAL_HOT=virtual_hover_at(hwnd,x,y);
             let pressed=VIRTUAL_PRESSED;
             VIRTUAL_PRESSED=0;
             ReleaseCapture();
@@ -1318,7 +1318,7 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
     if id==ID_MINIMIZE||id==ID_CLOSE {
         let hovered=item.itemState&ODS_HOTLIGHT as u32!=0;
         let active=hovered;
-        let background=animated_button_color(item.hwndItem,id,if active{if id==ID_CLOSE{0x002311E8}else{0x00F5F5F5}}else{0x00FFFFFF});
+        let background=animated_button_color(item.hwndItem,id,if active{if id==ID_CLOSE{0x002311E8}else{0x00E0E0E0}}else{0x00FFFFFF});
         if background!=0x00FFFFFF&&ui_rounding::enabled(){ui_rounding::control(item.hDC,item.rcItem,background,None,0x00FFFFFF,(4*dpi::window_dpi(item.hwndItem).max(96)as i32/96).max(1));}
         else{let brush=CreateSolidBrush(background);FillRect(item.hDC,&item.rcItem,brush);DeleteObject(brush);}
         let icon=animated_button_color(item.hwndItem,id+2000,if active&&id==ID_CLOSE{0x00FFFFFF}else if active{0x00555555}else{0x00888888});
@@ -1443,6 +1443,18 @@ unsafe fn menu_layout(hwnd:HWND,client:&RECT,dpi:i32)->(i32,i32,i32){
 
 unsafe fn virtual_button_at(hwnd:HWND,x:i32,y:i32)->usize{
     virtual_buttons(hwnd).into_iter().rev().find_map(|(id,rect)|rect_contains(&rect,x,y).then_some(id)).unwrap_or(0)
+}
+
+unsafe fn virtual_hover_at(hwnd:HWND,x:i32,y:i32)->usize{
+    let button=virtual_button_at(hwnd,x,y);
+    if button!=0{return button;}
+    if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS
+        &&!directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
+        if let Some(index)=settings_ui::field_rects(hwnd).iter().position(|rect|rect_contains(rect,x,y)){
+            return [ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY][index];
+        }
+    }
+    0
 }
 
 unsafe fn virtual_focus_order(hwnd:HWND)->Vec<usize>{

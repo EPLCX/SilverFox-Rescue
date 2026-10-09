@@ -23,11 +23,13 @@ pub unsafe fn paint(dc:HDC,client:&RECT,dpi:i32,show_text:bool){
     let gpu=match page.value.gpu.as_str(){"enabled"=>"启用","disabled"=>"禁用",_=>"自动"};
     let hidden=match page.value.hide_controls.as_str(){"enabled"=>"关闭","disabled"=>"开启",_=>"自动"};
     let values=[gpu,page.threads.as_str(),page.value.update_channel.as_str(),hidden];
+    let field_ids=[crate::ID_SETTINGS_GPU,crate::ID_SETTINGS_THREADS,crate::ID_SETTINGS_CHANNEL,crate::ID_SETTINGS_ACCESSIBILITY];
     for i in 0..4{
         fill(dc,ui.rows[i],0x00FFFFFF);
         if show_text{label(dc,ui.rows[i],names[i],INK);}
-        if crate::ui_rounding::enabled(){crate::ui_rounding::control(dc,ui.fields[i].rect(),0x00FFFFFF,Some(BORDER),0x00FFFFFF,scale(4,dpi).max(1));}
-        else{fill(dc,ui.fields[i],0x00FFFFFF);outline(dc,ui.fields[i],BORDER);}
+        let background=if crate::VIRTUAL_HOT==field_ids[i]{0x00E0E0E0}else{0x00FFFFFF};
+        if crate::ui_rounding::enabled(){crate::ui_rounding::control(dc,ui.fields[i].rect(),background,Some(BORDER),0x00FFFFFF,scale(4,dpi).max(1));}
+        else{fill(dc,ui.fields[i],background);outline(dc,ui.fields[i],BORDER);}
         if show_text{label(dc,ui.fields[i],values[i],INK);}
     }
     fill(dc,ui.status,PALE);
