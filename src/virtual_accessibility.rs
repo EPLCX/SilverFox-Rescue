@@ -1,5 +1,5 @@
-//! MSAA facade for the single, entirely self-painted main window.
-//! It is installed only while the user has enabled screen-reader support.
+//! Shared MSAA/UIA facade for the painted main window and modal prompts.
+//! Prompts always expose their text and controls; the main window follows settings.
 use super::*;
 use std::{ffi::c_void,ptr::null_mut,sync::atomic::{AtomicUsize,Ordering}};
 use windows_sys::{core::GUID,Win32::{Foundation::{POINT,RECT},Graphics::Gdi::{ClientToScreen,ScreenToClient},System::Variant::{VARIANT,VT_EMPTY,VT_I4},UI::{Accessibility::{LresultFromObject,ROLE_SYSTEM_CHECKBUTTON,ROLE_SYSTEM_CLIENT,ROLE_SYSTEM_COMBOBOX,ROLE_SYSTEM_LISTITEM,ROLE_SYSTEM_PROGRESSBAR,ROLE_SYSTEM_PUSHBUTTON,ROLE_SYSTEM_TEXT},WindowsAndMessaging::{STATE_SYSTEM_CHECKED,STATE_SYSTEM_FOCUSED,STATE_SYSTEM_SELECTED}}}};
@@ -10,26 +10,44 @@ const S_OK:i32=0;const S_FALSE:i32=1;
 const E_NOINTERFACE:i32=0x80004002u32 as i32;
 const E_INVALIDARG:i32=0x80070057u32 as i32;
 const E_NOTIMPL:i32=0x80004001u32 as i32;
+const E_ACCESSDENIED:i32=0x80070005u32 as i32;
 const IID_UNKNOWN:GUID=GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
 const IID_DISPATCH:GUID=GUID::from_u128(0x00020400_0000_0000_c000_000000000046);
 const IID_ACCESSIBLE:GUID=GUID::from_u128(0x618736e0_3c3d_11cf_810c_00aa00389b71);
 const STATE_FOCUSABLE:u32=0x00100000;
 const ACC_ACTION:u32=WM_APP+0x53;
 const ACC_FOCUS:u32=WM_APP+0x54;
-static ACTION_QUEUE:OnceLock<Mutex<VecDeque<usize>>>=OnceLock::new();
-fn action_queue()->&'static Mutex<VecDeque<usize>>{ACTION_QUEUE.get_or_init(||Mutex::new(VecDeque::new()))}
-pub(super) unsafe fn queue_action(hwnd:HWND,id:usize)->bool{
-    let mut queue=action_queue().lock().unwrap_or_else(|error|error.into_inner());
-    queue.push_back(id);
-    if PostMessageW(hwnd,ACC_ACTION,0,0)!=0{true}else{queue.pop_back();false}
-}
-pub(super) fn pending_actions()->Vec<usize>{action_queue().lock().unwrap_or_else(|error|error.into_inner()).drain(..).collect()}
 
 #[derive(Clone)]
 pub(super) struct Item{pub(super) id:usize,pub(super) name:String,pub(super) role:u32,pub(super) rect:RECT,pub(super) focusable:bool,pub(super) selected:bool,pub(super) checked:bool}
 fn item(id:usize,name:String,role:u32,rect:RECT,focusable:bool)->Item{Item{id,name,role,rect,focusable,selected:false,checked:false}}
 
+// Window-owned snapshots keep COM reads independent of the modal window's
+// userdata lifetime and its UI thread. The main window uses the same providers.
+struct PromptSnapshot{title:String,items:Vec<Item>,focus:usize,protected:HashSet<usize>}
+static PROMPTS:OnceLock<Mutex<HashMap<usize,PromptSnapshot>>>=OnceLock::new();
+fn prompts()->&'static Mutex<HashMap<usize,PromptSnapshot>>{PROMPTS.get_or_init(||Mutex::new(HashMap::new()))}
+pub fn register_prompt(hwnd:HWND,title:String,items:Vec<Item>,focus:usize,protected:HashSet<usize>){prompts().lock().unwrap_or_else(|error|error.into_inner()).insert(hwnd as usize,PromptSnapshot{title,items,focus,protected});}
+pub fn unregister_prompt(hwnd:HWND){prompts().lock().unwrap_or_else(|error|error.into_inner()).remove(&(hwnd as usize));}
+pub fn is_prompt(hwnd:HWND)->bool{prompts().lock().unwrap_or_else(|error|error.into_inner()).contains_key(&(hwnd as usize))}
+pub unsafe fn focused_id(hwnd:HWND)->usize{
+    let focus=prompts().lock().unwrap_or_else(|error|error.into_inner()).get(&(hwnd as usize)).map(|prompt|prompt.focus);
+    if let Some(focus)=focus{return focus;}VIRTUAL_FOCUS
+}
+pub fn root_name(hwnd:HWND)->String{prompts().lock().unwrap_or_else(|error|error.into_inner()).get(&(hwnd as usize)).map(|prompt|prompt.title.clone()).unwrap_or_else(||"银狐专杀急救箱".into())}
+pub unsafe fn window_has_focus(hwnd:HWND)->bool{
+    let mut info:GUITHREADINFO=std::mem::zeroed();info.cbSize=std::mem::size_of::<GUITHREADINFO>()as u32;
+    GetGUIThreadInfo(GetWindowThreadProcessId(hwnd,null_mut()),&mut info)!=0&&info.hwndFocus==hwnd
+}
+pub fn update_prompt_focus(hwnd:HWND,id:usize){if let Some(prompt)=prompts().lock().unwrap_or_else(|error|error.into_inner()).get_mut(&(hwnd as usize)){prompt.focus=id;}}
+pub fn operation_blocked(hwnd:HWND,id:usize,activate:bool)->bool{
+    if let Some(prompt)=prompts().lock().unwrap_or_else(|error|error.into_inner()).get(&(hwnd as usize)){return activate&&prompt.protected.contains(&id);}
+    if input_guard::protection_enabled(){if activate{input_guard::schedule_auto_prompt();}record_blocked_control();true}else{false}
+}
+
 pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
+    if let Some(prompt)=prompts().lock().unwrap_or_else(|error|error.into_inner()).get(&(hwnd as usize)){return prompt.items.clone();}
+    if IsWindow(hwnd)==0{return Vec::new();}
     let dpi=dpi::window_dpi(hwnd).max(96)as i32;let s=|v:i32|v*dpi/96;
     let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
     let mode=state().ui_mode.load(Ordering::Acquire);
@@ -50,9 +68,8 @@ pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
             for (index,line) in visible_scan_activity().into_iter().enumerate(){result.push(item(ID_PAGE_ACTIVITY+index,line,ROLE_SYSTEM_TEXT,RECT{left:s(46),top:s(162+index as i32*27),right:client.right-s(46),bottom:s(187+index as i32*27)},false));}
         }
         if mode==3&&subpage==PAGE_SETTINGS{
-            for (index,rect) in settings_ui::label_rects(hwnd).into_iter().enumerate(){result.push(item(ID_SETTINGS_LABEL_FIRST+index,["GPU 机器学习加速","扫描线程数","更新通道","无障碍优化"][index].into(),ROLE_SYSTEM_TEXT,rect,false));}
-            for (index,(name,rect)) in settings_ui::field_labels().into_iter().zip(settings_ui::field_rects(hwnd)).enumerate(){result.push(item([ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY][index],name,if index==1{ROLE_SYSTEM_TEXT}else{ROLE_SYSTEM_COMBOBOX},rect,true));}
-            result.push(item(ID_PAGE_STATUS,settings_ui::status_text(),ROLE_SYSTEM_TEXT,settings_ui::status_rect(hwnd),false));
+            for (index,rect) in settings_ui::label_rects(hwnd).into_iter().enumerate(){result.push(item(ID_SETTINGS_LABEL_FIRST+index,["GPU 机器学习加速","扫描线程数","更新通道","无障碍优化","控件保护"][index].into(),ROLE_SYSTEM_TEXT,rect,false));}
+            for (index,(name,rect)) in settings_ui::field_labels().into_iter().zip(settings_ui::field_rects(hwnd)).enumerate(){result.push(item([ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index],name,if index==1{ROLE_SYSTEM_TEXT}else{ROLE_SYSTEM_COMBOBOX},rect,true));}
         }else if mode==3{
             let list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let area_top=s(105);let row_height=s(26).max(1);let visible=((client.bottom-s(140)-area_top-s(8))/row_height).max(0)as usize;
             for (slot,line) in list.lines.iter().skip(list.scroll).take(visible).enumerate(){let index=list.scroll+slot;let mut entry=item(1000+index,line.clone(),ROLE_SYSTEM_LISTITEM,RECT{left:s(27),top:area_top+s(4)+slot as i32*row_height,right:client.right-s(27),bottom:area_top+s(4)+(slot as i32+1)*row_height},true);entry.selected=list.selected==Some(index);result.push(entry);}
@@ -88,27 +105,27 @@ unsafe extern "system" fn invoke(_: *mut c_void,_:i32,_:*const GUID,_:u32,_:u16,
 unsafe extern "system" fn parent(_: *mut c_void,out:*mut *mut c_void)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_FALSE}}
 unsafe extern "system" fn child_count(this:*mut c_void,out:*mut i32)->i32{if out.is_null(){E_INVALIDARG}else{*out=items(object(this).hwnd).len()as i32;S_OK}}
 unsafe extern "system" fn child(_: *mut c_void,_:VARIANT,out:*mut *mut c_void)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_FALSE}}
-unsafe extern "system" fn name(this:*mut c_void,which:VARIANT,out:*mut *mut u16)->i32{match entry(this,which){Ok(Some(item))=>bstr(out,&item.name),Ok(None)=>bstr(out,"银狐专杀急救箱"),Err(error)=>error}}
+unsafe extern "system" fn name(this:*mut c_void,which:VARIANT,out:*mut *mut u16)->i32{match entry(this,which){Ok(Some(item))=>bstr(out,&item.name),Ok(None)=>bstr(out,&root_name(object(this).hwnd)),Err(error)=>error}}
 unsafe extern "system" fn value(this:*mut c_void,which:VARIANT,out:*mut *mut u16)->i32{match entry(this,which){Ok(Some(item)) if matches!(item.id,ID_PAGE_DETAIL|ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|ID_DIRECTORY_INPUT)=>bstr(out,&item.name),Ok(_)=>S_FALSE,Err(error)=>error}}
 unsafe extern "system" fn description(_: *mut c_void,_:VARIANT,out:*mut *mut u16)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_FALSE}}
 unsafe extern "system" fn role(this:*mut c_void,which:VARIANT,out:*mut VARIANT)->i32{match entry(this,which){Ok(Some(item))=>variant_i4(out,item.role as i32),Ok(None)=>variant_i4(out,ROLE_SYSTEM_CLIENT as i32),Err(error)=>error}}
-unsafe extern "system" fn state_value(this:*mut c_void,which:VARIANT,out:*mut VARIANT)->i32{match entry(this,which){Ok(Some(item))=>{let mut flags=0;if item.focusable{flags|=STATE_FOCUSABLE;}if item.id==VIRTUAL_FOCUS{flags|=STATE_SYSTEM_FOCUSED;}if item.selected{flags|=STATE_SYSTEM_SELECTED;}if item.checked{flags|=STATE_SYSTEM_CHECKED;}variant_i4(out,flags as i32)},Ok(None)=>variant_i4(out,0),Err(error)=>error}}
+unsafe extern "system" fn state_value(this:*mut c_void,which:VARIANT,out:*mut VARIANT)->i32{match entry(this,which){Ok(Some(item))=>{let mut flags=0;if item.focusable{flags|=STATE_FOCUSABLE;}if item.id==focused_id(object(this).hwnd){flags|=STATE_SYSTEM_FOCUSED;}if item.selected{flags|=STATE_SYSTEM_SELECTED;}if item.checked{flags|=STATE_SYSTEM_CHECKED;}variant_i4(out,flags as i32)},Ok(None)=>variant_i4(out,0),Err(error)=>error}}
 unsafe extern "system" fn help(_: *mut c_void,_:VARIANT,out:*mut *mut u16)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_FALSE}}
 unsafe extern "system" fn help_topic(_: *mut c_void,out:*mut *mut u16,_:VARIANT,_:*mut i32)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_FALSE}}
 unsafe extern "system" fn shortcut(_: *mut c_void,_:VARIANT,out:*mut *mut u16)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_FALSE}}
-unsafe extern "system" fn focus(this:*mut c_void,out:*mut VARIANT)->i32{let index=items(object(this).hwnd).iter().position(|item|item.id==VIRTUAL_FOCUS).map(|i|i as i32+1).unwrap_or(0);variant_i4(out,index)}
+unsafe extern "system" fn focus(this:*mut c_void,out:*mut VARIANT)->i32{let index=items(object(this).hwnd).iter().position(|item|item.id==focused_id(object(this).hwnd)).map(|i|i as i32+1).unwrap_or(0);variant_i4(out,index)}
 unsafe extern "system" fn selection(this:*mut c_void,out:*mut VARIANT)->i32{let index=items(object(this).hwnd).iter().position(|item|item.selected).map(|i|i as i32+1).unwrap_or(0);if index==0{if !out.is_null(){*out=std::mem::zeroed();(*out).Anonymous.Anonymous.vt=VT_EMPTY;}S_FALSE}else{variant_i4(out,index)}}
-unsafe extern "system" fn default_action(this:*mut c_void,which:VARIANT,out:*mut *mut u16)->i32{match entry(this,which){Ok(Some(item)) if item.focusable=>bstr(out,if item.role==ROLE_SYSTEM_CHECKBUTTON{"切换"}else if item.role==ROLE_SYSTEM_LISTITEM{"选择"}else{"按下"}),Ok(_)=>S_FALSE,Err(error)=>error}}
-unsafe extern "system" fn select(this:*mut c_void,_:i32,which:VARIANT)->i32{match entry(this,which){Ok(Some(item)) if item.focusable=>{PostMessageW(object(this).hwnd,ACC_FOCUS,item.id,0);S_OK},Ok(_)=>S_FALSE,Err(error)=>error}}
+unsafe extern "system" fn default_action(this:*mut c_void,which:VARIANT,out:*mut *mut u16)->i32{match entry(this,which){Ok(Some(item)) if item.focusable&&!(is_prompt(object(this).hwnd)&&item.role==ROLE_SYSTEM_TEXT)=>bstr(out,if item.role==ROLE_SYSTEM_CHECKBUTTON{"切换"}else if item.role==ROLE_SYSTEM_LISTITEM{"选择"}else{"按下"}),Ok(_)=>S_FALSE,Err(error)=>error}}
+unsafe extern "system" fn select(this:*mut c_void,_:i32,which:VARIANT)->i32{match entry(this,which){Ok(Some(item)) if item.focusable=>{if operation_blocked(object(this).hwnd,item.id,false){E_ACCESSDENIED}else if input_guard::post_internal(object(this).hwnd,ACC_FOCUS,item.id,0){S_OK}else{S_FALSE}},Ok(_)=>S_FALSE,Err(error)=>error}}
 unsafe extern "system" fn location(this:*mut c_void,x:*mut i32,y:*mut i32,w:*mut i32,h:*mut i32,which:VARIANT)->i32{if x.is_null()||y.is_null()||w.is_null()||h.is_null(){return E_INVALIDARG;}let rect=match entry(this,which){Ok(Some(item))=>item.rect,Ok(None)=>{let mut rect=std::mem::zeroed();GetClientRect(object(this).hwnd,&mut rect);rect},Err(error)=>return error};let mut point=POINT{x:rect.left,y:rect.top};ClientToScreen(object(this).hwnd,&mut point);*x=point.x;*y=point.y;*w=rect.right-rect.left;*h=rect.bottom-rect.top;S_OK}
 unsafe extern "system" fn navigate(this:*mut c_void,direction:i32,which:VARIANT,out:*mut VARIANT)->i32{if out.is_null(){return E_INVALIDARG;}let count=items(object(this).hwnd).len()as i32;let start=if which.Anonymous.Anonymous.vt==VT_I4{which.Anonymous.Anonymous.Anonymous.lVal}else{return E_INVALIDARG};let next=match direction as u32{7=>1,8=>count,5=>start+1,6=>start-1,_=>0};if next>0&&next<=count{variant_i4(out,next)}else{*out=std::mem::zeroed();(*out).Anonymous.Anonymous.vt=VT_EMPTY;S_FALSE}}
 unsafe extern "system" fn hit_test(this:*mut c_void,x:i32,y:i32,out:*mut VARIANT)->i32{let mut point=POINT{x,y};ScreenToClient(object(this).hwnd,&mut point);let list=items(object(this).hwnd);let index=list.iter().rposition(|item|rect_contains(&item.rect,point.x,point.y)).map(|i|i as i32+1).unwrap_or(0);variant_i4(out,index)}
-unsafe extern "system" fn do_action(this:*mut c_void,which:VARIANT)->i32{match entry(this,which){Ok(Some(item)) if item.focusable=>{if queue_action(object(this).hwnd,item.id){S_OK}else{S_FALSE}},Ok(_)=>S_FALSE,Err(error)=>error}}
+unsafe extern "system" fn do_action(this:*mut c_void,which:VARIANT)->i32{match entry(this,which){Ok(Some(item)) if item.focusable=>{if operation_blocked(object(this).hwnd,item.id,true){E_ACCESSDENIED}else if input_guard::post_internal(object(this).hwnd,ACC_ACTION,item.id,0){S_OK}else{S_FALSE}},Ok(_)=>S_FALSE,Err(error)=>error}}
 unsafe extern "system" fn put_name(_: *mut c_void,_:VARIANT,_:*mut u16)->i32{E_NOTIMPL}
 unsafe extern "system" fn put_value(_: *mut c_void,_:VARIANT,_:*mut u16)->i32{E_NOTIMPL}
 
 pub unsafe fn get_object(hwnd:HWND,w:WPARAM,l:LPARAM)->LRESULT{
-    get_object_with_mode(hwnd,w,l,accessible_text_enabled())
+    get_object_with_mode(hwnd,w,l,is_prompt(hwnd)||accessible_text_enabled())
 }
 unsafe fn get_object_with_mode(hwnd:HWND,w:WPARAM,l:LPARAM,enabled:bool)->LRESULT{
     let object_id=l as i32;
@@ -125,16 +142,38 @@ unsafe fn get_object_with_mode(hwnd:HWND,w:WPARAM,l:LPARAM,enabled:bool)->LRESUL
     trace_ui_provider(&format!("MSAA provider=0x{:x} LresultFromObject=0x{:x}",raw as usize,result as usize));
     release(raw.cast());result
 }
-pub unsafe fn notify_focus(hwnd:HWND,id:usize){if !accessible_text_enabled(){return;}if let Some(index)=items(hwnd).iter().position(|entry|entry.id==id){NotifyWinEvent(EVENT_OBJECT_FOCUS,hwnd,OBJID_CLIENT,index as i32+1);}uia::notify_focus(hwnd,id);}
+fn queue_prompt_uia_focus(hwnd:HWND,id:usize){
+    use std::sync::mpsc::{sync_channel,SyncSender};
+    static EVENTS:OnceLock<SyncSender<(usize,usize)>>=OnceLock::new();
+    let sender=EVENTS.get_or_init(||{
+        let(sender,receiver)=sync_channel::<(usize,usize)>(4);
+        std::thread::spawn(move||unsafe{
+            use windows_sys::Win32::System::Com::COINIT_MULTITHREADED;
+            let result=CoInitializeEx(null_mut(),COINIT_MULTITHREADED as u32);
+            if result<0{audit::record("prompt_accessibility",&format!("初始化提示框 UIA 事件线程失败：{result:#x}"));return;}
+            while let Ok(mut event)=receiver.recv(){
+                while let Ok(latest)=receiver.try_recv(){event=latest;}
+                let(window,id)=event;let hwnd=window as HWND;
+                if is_prompt(hwnd)&&focused_id(hwnd)==id{uia::notify_focus(hwnd,id);}
+            }
+            CoUninitialize();
+        });sender
+    });
+    // Never wait for an accessibility client on the window/input-hook thread.
+    let _=sender.try_send((hwnd as usize,id));
+}
+pub unsafe fn notify_focus(hwnd:HWND,id:usize){
+    let prompt=is_prompt(hwnd);if !prompt&&!accessible_text_enabled(){return;}
+    if let Some(index)=items(hwnd).iter().position(|entry|entry.id==id){NotifyWinEvent(EVENT_OBJECT_FOCUS,hwnd,OBJID_CLIENT,index as i32+1);}
+    if prompt{queue_prompt_uia_focus(hwnd,id);}else{uia::notify_focus(hwnd,id);}
+}
 pub unsafe fn notify_state(hwnd:HWND,id:usize){if !accessible_text_enabled(){return;}if let Some(index)=items(hwnd).iter().position(|entry|entry.id==id){NotifyWinEvent(EVENT_OBJECT_STATECHANGE,hwnd,OBJID_CLIENT,index as i32+1);}}
-pub unsafe fn announce_text(hwnd:HWND,text:&str,activity:&str){if accessible_text_enabled(){uia::announce_text(hwnd,text,activity);}}
+pub unsafe fn announce_text(hwnd:HWND,text:&str,activity:&str){if is_prompt(hwnd)||accessible_text_enabled(){uia::announce_text(hwnd,text,activity);}}
 fn setting_change_announcement(name:&str,description:Option<&str>)->(String,String){
     let basic=if let Some((field,value))=name.split_once('：'){format!("{field}，当前值：{value}")}else{name.to_owned()};
     (basic,description.unwrap_or("").to_owned())
 }
 pub unsafe fn announce_setting(hwnd:HWND,id:usize){if !accessible_text_enabled(){return;}if let Some(item)=items(hwnd).into_iter().find(|entry|entry.id==id){let(basic,detail)=setting_change_announcement(&item.name,focus_description(id,3,PAGE_SETTINGS));super::announce_with_detail(hwnd,&basic,&detail,&format!("silverfox.setting.{id}"));}}
-pub unsafe fn announce_settings_status(hwnd:HWND){if !accessible_text_enabled(){return;}let message=settings_ui::status_announcement();if !message.is_empty(){super::announce_with_detail(hwnd,&message,"","silverfox.settings.save");}}
-pub unsafe fn announce_settings_reset(hwnd:HWND){if !accessible_text_enabled(){return;}super::announce_with_detail(hwnd,"已恢复默认设置",&settings_ui::field_labels().join("；"),"silverfox.settings.reset");}
 
 pub(super) fn focus_description(id:usize,mode:usize,subpage:usize)->Option<&'static str>{
     Some(match id{
@@ -152,9 +191,10 @@ pub(super) fn focus_description(id:usize,mode:usize,subpage:usize)->Option<&'sta
         ID_SETTINGS_THREADS=>"输入扫描线程数，保存后在下一次扫描生效。",
         ID_SETTINGS_CHANNEL=>"在稳定通道与测试通道之间切换。",
         ID_SETTINGS_ACCESSIBILITY=>"自动模式会在检测到讲述人时提供可访问文本。",
+        ID_SETTINGS_INPUT_PROTECTION=>"选择自动、开启或关闭控件保护；保存时关闭保护需要确认。",
         ID_PAGE_ACTION if mode==3&&subpage==PAGE_SETTINGS=>"保存当前设置，下一次扫描时生效。",
         ID_PAGE_ACTION=>"执行当前页面显示的操作。",
-        ID_SKIP if mode==3&&subpage==PAGE_SETTINGS=>"恢复默认设置，保存后生效。",
+        ID_SKIP if mode==3&&subpage==PAGE_SETTINGS=>"保存默认设置并返回首页。",
         ID_SKIP if mode==UI_MODE_REMEDIATION_DONE=>"查看已隔离文件。",
         ID_SKIP=>"暂不处理当前所选项目。",
         ID_DONE if mode==UI_MODE_REMEDIATION_DONE=>"返回程序首页。",
@@ -174,7 +214,7 @@ pub(super) fn focus_description(id:usize,mode:usize,subpage:usize)->Option<&'sta
 pub(super) unsafe fn focus_announcement(hwnd:HWND,id:usize,mode:usize,subpage:usize)->Option<String>{
     let item=items(hwnd).into_iter().find(|entry|entry.id==id)?;
     let description=focus_description(id,mode,subpage);
-    if matches!(id,ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY){
+    if matches!(id,ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|ID_SETTINGS_INPUT_PROTECTION){
         let value=item.name.split_once('：').map(|(_,value)|value).unwrap_or("");
         return description.map(|text|format!("当前值：{value}。{text}"));
     }
@@ -202,7 +242,7 @@ pub unsafe fn handle_action(hwnd:HWND,id:usize,activate:bool){
     if (ID_FINDING_FIRST..ID_FINDING_FIRST+FINDING_CONTROL_COUNT).contains(&id){if activate{let row=state().result_scroll.load(Ordering::Relaxed)/(56*dpi::window_dpi(hwnd).max(96)/96)as usize+id-ID_FINDING_FIRST;if let Some(index)=alert_indices().get(row).copied(){let mut selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());if !selected.insert(index){selected.remove(&index);}drop(selected);notify_state(hwnd,id);}}set_virtual_focus(hwnd,id);return;}
     set_virtual_focus(hwnd,id);
     if !activate{return;}
-    if [ID_SETTINGS_GPU,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY].contains(&id){settings_ui::activate_focused(hwnd);return;}
+    if [ID_SETTINGS_GPU,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION].contains(&id){settings_ui::activate_focused(hwnd);return;}
     if virtual_buttons(hwnd).iter().any(|(button,_)|*button==id){activate_virtual_button(hwnd,id);}
 }
 pub const ACTION_MESSAGE:u32=ACC_ACTION;pub const FOCUS_MESSAGE:u32=ACC_FOCUS;

@@ -1,6 +1,5 @@
 //! UI Automation fragment for the painted window.
 use super::*;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::{System::{LibraryLoader::{GetModuleHandleW,GetProcAddress},Variant::{VT_BOOL,VT_BSTR}},UI::Accessibility::{UiaRect,UiaReturnRawElementProvider,UiaRaiseAutomationEvent,UiaHostProviderFromHwnd,UIA_AutomationFocusChangedEventId,UIA_InvokePatternId,UIA_NamePropertyId,UIA_ControlTypePropertyId,UIA_IsKeyboardFocusablePropertyId,UIA_HasKeyboardFocusPropertyId,UIA_IsEnabledPropertyId,UIA_IsControlElementPropertyId,UIA_IsContentElementPropertyId,UIA_AutomationIdPropertyId,UIA_NativeWindowHandlePropertyId,UIA_LiveSettingPropertyId,UIA_ValueValuePropertyId,UIA_ButtonControlTypeId,UIA_CheckBoxControlTypeId,UIA_ComboBoxControlTypeId,UIA_EditControlTypeId,UIA_ListItemControlTypeId,UIA_ProgressBarControlTypeId,UIA_TextControlTypeId,UIA_PaneControlTypeId,ProviderOptions_ServerSideProvider,ProviderOptions_UseComThreading,UiaAppendRuntimeId,NotificationKind_Other,NotificationProcessing_MostRecent}};
 
 const IID_SIMPLE:GUID=GUID::from_u128(0xd6dd68d1_86fd_4332_8666_9abedea2d24c);
@@ -35,16 +34,17 @@ unsafe fn out_i4(out:*mut VARIANT,value:i32)->i32{if out.is_null(){return E_INVA
 unsafe fn out_bool(out:*mut VARIANT,value:bool)->i32{if out.is_null(){return E_INVALIDARG;}*out=std::mem::zeroed();(*out).Anonymous.Anonymous.vt=VT_BOOL;(*out).Anonymous.Anonymous.Anonymous.boolVal=if value{-1}else{0};S_OK}
 unsafe fn out_text(out:*mut VARIANT,text:&str)->i32{if out.is_null(){return E_INVALIDARG;}*out=std::mem::zeroed();let utf16:Vec<u16>=text.encode_utf16().collect();let value=SysAllocStringLen(utf16.as_ptr(),utf16.len()as u32);if value.is_null(){return 0x8007000eu32 as i32;}(*out).Anonymous.Anonymous.vt=VT_BSTR;(*out).Anonymous.Anonymous.Anonymous.bstrVal=value;S_OK}
 unsafe extern "system" fn provider_options(_: *mut c_void,out:*mut i32)->i32{if out.is_null(){E_INVALIDARG}else{*out=ProviderOptions_ServerSideProvider|ProviderOptions_UseComThreading;S_OK}}
-unsafe extern "system" fn pattern(this:*mut c_void,id:i32,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}*out=null_mut();let owner=node(this);if id==UIA_InvokePatternId&&found(owner).map(|entry|entry.focusable).unwrap_or(false){*out=interface(owner,3);add_ref(this);}S_OK}
+unsafe extern "system" fn pattern(this:*mut c_void,id:i32,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}*out=null_mut();let owner=node(this);if id==UIA_InvokePatternId&&found(owner).map(|entry|entry.focusable&&!(is_prompt((*owner).hwnd)&&entry.role==ROLE_SYSTEM_TEXT)).unwrap_or(false){*out=interface(owner,3);add_ref(this);}S_OK}
 #[allow(non_upper_case_globals)] // UIA property IDs use the Windows SDK's PascalCase names.
 unsafe extern "system" fn property(this:*mut c_void,id:i32,out:*mut VARIANT)->i32{
     if out.is_null(){return E_INVALIDARG;}*out=std::mem::zeroed();let owner=node(this);let entry=found(owner);let is_root=(*owner).id==0;
     match id{
-        UIA_NamePropertyId=>out_text(out,entry.as_ref().map(|item|item.name.as_str()).unwrap_or("银狐专杀急救箱")),
+        UIA_NamePropertyId=>out_text(out,&entry.as_ref().map(|item|item.name.clone()).unwrap_or_else(||root_name((*owner).hwnd))),
         UIA_ControlTypePropertyId=>out_i4(out,entry.as_ref().map(|item|match item.role{ROLE_SYSTEM_PUSHBUTTON=>UIA_ButtonControlTypeId,ROLE_SYSTEM_CHECKBUTTON=>UIA_CheckBoxControlTypeId,ROLE_SYSTEM_COMBOBOX=>UIA_ComboBoxControlTypeId,ROLE_SYSTEM_LISTITEM=>UIA_ListItemControlTypeId,ROLE_SYSTEM_PROGRESSBAR=>UIA_ProgressBarControlTypeId,_=>if item.id==ID_SETTINGS_THREADS||item.id==ID_DIRECTORY_INPUT{UIA_EditControlTypeId}else{UIA_TextControlTypeId}}).unwrap_or(UIA_PaneControlTypeId)),
         UIA_IsKeyboardFocusablePropertyId=>out_bool(out,entry.as_ref().map(|item|item.focusable).unwrap_or(true)),
-        UIA_HasKeyboardFocusPropertyId=>out_bool(out,if is_root{GetFocus()==(*owner).hwnd}else{(*owner).id==VIRTUAL_FOCUS&&GetFocus()==(*owner).hwnd}),
-        UIA_IsEnabledPropertyId|UIA_IsControlElementPropertyId|UIA_IsContentElementPropertyId=>out_bool(out,true),
+        UIA_HasKeyboardFocusPropertyId=>out_bool(out,window_has_focus((*owner).hwnd)&&(is_root||(*owner).id==focused_id((*owner).hwnd))),
+        UIA_IsEnabledPropertyId=>out_bool(out,IsWindowEnabled((*owner).hwnd)!=0),
+        UIA_IsControlElementPropertyId|UIA_IsContentElementPropertyId=>out_bool(out,true),
         UIA_AutomationIdPropertyId=>out_text(out,&format!("silverfox.virtual.{}",(*owner).id)),
         UIA_NativeWindowHandlePropertyId=>out_i4(out,if is_root{(*owner).hwnd as usize as i32}else{0}),
         UIA_LiveSettingPropertyId if (*owner).id==ID_PAGE_DETAIL&&state().ui_mode.load(Ordering::Acquire)==1=>out_i4(out,Assertive),
@@ -58,11 +58,18 @@ unsafe extern "system" fn navigate(this:*mut c_void,direction:i32,out:*mut *mut 
 unsafe extern "system" fn runtime_id(this:*mut c_void,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}*out=null_mut();let owner=node(this);if (*owner).id==0{return S_OK;}let array=SafeArrayCreateVector(VT_I4,0,2);if array.is_null(){return 0x8007000eu32 as i32;}for (index,value) in [UiaAppendRuntimeId as i32,(*owner).id as i32].iter().enumerate(){let index=index as i32;if SafeArrayPutElement(array,&index,(value as *const i32).cast())<0{return E_INVALIDARG;}}*out=array;S_OK}
 unsafe extern "system" fn bounds(this:*mut c_void,out:*mut UiaRect)->i32{if out.is_null(){return E_INVALIDARG;}let owner=node(this);let rect=if let Some(item)=found(owner){item.rect}else{let mut rect:RECT=std::mem::zeroed();GetClientRect((*owner).hwnd,&mut rect);rect};let mut point=POINT{x:rect.left,y:rect.top};ClientToScreen((*owner).hwnd,&mut point);*out=UiaRect{left:point.x as f64,top:point.y as f64,width:(rect.right-rect.left)as f64,height:(rect.bottom-rect.top)as f64};S_OK}
 unsafe extern "system" fn embedded_roots(_: *mut c_void,out:*mut *mut c_void)->i32{if out.is_null(){E_INVALIDARG}else{*out=null_mut();S_OK}}
-unsafe extern "system" fn set_focus(this:*mut c_void)->i32{let owner=node(this);if (*owner).id==0{SetFocus((*owner).hwnd);}else{PostMessageW((*owner).hwnd,FOCUS_MESSAGE,(*owner).id,0);}S_OK}
+unsafe extern "system" fn set_focus(this:*mut c_void)->i32{
+    let owner=node(this);let hwnd=(*owner).hwnd;let id=(*owner).id;
+    if operation_blocked(hwnd,id,false){return E_ACCESSDENIED;}
+    // Modal focus changes belong on the window's UI thread. COM callbacks only
+    // enqueue them, including focus requests for the dialog's root element.
+    if is_prompt(hwnd){let target=if id==0{focused_id(hwnd)}else{id};return if input_guard::post_internal(hwnd,FOCUS_MESSAGE,target,0){S_OK}else{S_FALSE};}
+    if id==0{SetFocus(hwnd);S_OK}else if input_guard::post_internal(hwnd,FOCUS_MESSAGE,id,0){S_OK}else{S_FALSE}
+}
 unsafe extern "system" fn fragment_root(this:*mut c_void,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}let owner=node(this);*out=make_node((*owner).hwnd,0,2);S_OK}
 unsafe extern "system" fn from_point(this:*mut c_void,x:f64,y:f64,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}let owner=node(this);let mut point=POINT{x:x as i32,y:y as i32};ScreenToClient((*owner).hwnd,&mut point);let id=items((*owner).hwnd).into_iter().rfind(|item|rect_contains(&item.rect,point.x,point.y)).map(|item|item.id).unwrap_or(0);*out=make_node((*owner).hwnd,id,1);S_OK}
-unsafe extern "system" fn get_focus(this:*mut c_void,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}let owner=node(this);let id=if items((*owner).hwnd).iter().any(|item|item.id==VIRTUAL_FOCUS){VIRTUAL_FOCUS}else{0};*out=make_node((*owner).hwnd,id,1);S_OK}
-unsafe extern "system" fn invoke(this:*mut c_void)->i32{let owner=node(this);if (*owner).id==0{return E_NOTIMPL;}if super::queue_action((*owner).hwnd,(*owner).id){S_OK}else{S_FALSE}}
+unsafe extern "system" fn get_focus(this:*mut c_void,out:*mut *mut c_void)->i32{if out.is_null(){return E_INVALIDARG;}let owner=node(this);let id=if items((*owner).hwnd).iter().any(|item|item.id==focused_id((*owner).hwnd)){focused_id((*owner).hwnd)}else{0};*out=make_node((*owner).hwnd,id,1);S_OK}
+unsafe extern "system" fn invoke(this:*mut c_void)->i32{let owner=node(this);if (*owner).id==0{return E_NOTIMPL;}if operation_blocked((*owner).hwnd,(*owner).id,true){E_ACCESSDENIED}else if input_guard::post_internal((*owner).hwnd,ACTION_MESSAGE,(*owner).id,0){S_OK}else{S_FALSE}}
 
 pub unsafe fn get_object(hwnd:HWND,w:WPARAM,l:LPARAM)->LRESULT{
     let provider=make_node(hwnd,0,0);
