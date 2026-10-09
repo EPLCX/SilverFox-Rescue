@@ -25,6 +25,7 @@ mod settings_ui;
 mod ui_rounding;
 mod dpi;
 mod virtual_accessibility;
+mod input_guard;
 use model:: {
     Finding, Verdict
 }
@@ -549,6 +550,7 @@ fn publish_findings(app:&AppState,findings:Vec<Finding>){
 fn requires_manual_selection(source:&str)->bool{source.starts_with("service-host-advisory:")}
 fn default_selected_indices()->HashSet<usize>{state().findings.lock().unwrap_or_else(|error|error.into_inner()).iter().enumerate().filter_map(|(index,finding)|(finding.verdict==Verdict::Malicious&&!requires_manual_selection(&finding.source)).then_some(index)).collect()}
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    let physical_input=input_guard::physical_message(hwnd,msg,w,l);
     let keyboard=if msg==WM_KEYDOWN{Some(true)}else if matches!(msg,WM_LBUTTONDOWN|WM_RBUTTONDOWN|WM_MBUTTONDOWN|WM_NCLBUTTONDOWN|WM_NCRBUTTONDOWN|WM_NCMBUTTONDOWN){Some(false)}else{None};
     if let Some(keyboard)=keyboard{if KEYBOARD_FOCUS_VISIBLE!=keyboard{KEYBOARD_FOCUS_VISIBLE=keyboard;InvalidateRect(hwnd,null(),0);}}
     if msg==WM_GETOBJECT{trace_ui_provider(&format!("WM_GETOBJECT hwnd=0x{:x} wParam=0x{:x} lParam={} (0x{:x}) thread={}",hwnd as usize,w,l as i32,l as usize,windows_sys::Win32::System::Threading::GetCurrentThreadId()));}
@@ -572,6 +574,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 }
                 , Err(error) => append(&format!("自我保护降级：{}\r\n", error))
             }}
+            if !input_guard::install(){audit::record("protection","停止操作输入钩子安装失败：仅接受具有有效物理输入凭据的停止操作");}
             0
         }
         WM_TIMER if w==RESULT_SCROLL_TIMER => {animate_result_scroll(hwnd);0}
@@ -761,6 +764,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             let (x,y)=point_from_lparam(l);
             if directory_input().lock().unwrap_or_else(|error|error.into_inner()).active && virtual_button_at(hwnd,x,y)==0{directory_input_click(hwnd,l);return 0;}
             let button=virtual_button_at(hwnd,x,y);
+            if button==ID_CANCEL{
+                if physical_input{request_stop(hwnd);}else{record_blocked_stop();}
+                return 0;
+            }
             if VIRTUAL_MENU_OPEN&&button==0{VIRTUAL_MENU_OPEN=false;InvalidateRect(hwnd,null(),0);return 0;}
             if button!=0{
                 VIRTUAL_PRESSED=button;
@@ -793,7 +800,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             ReleaseCapture();
             if pressed==ID_CLOSE&&released!=ID_CLOSE&&VIRTUAL_FOCUS==ID_CLOSE{VIRTUAL_FOCUS=0;}
             InvalidateRect(hwnd,null(),0);
-            if pressed!=0&&pressed==released{activate_virtual_button(hwnd,pressed);}
+            if pressed!=0&&pressed==released{activate_input_button(hwnd,pressed,physical_input);}
             if pressed==0&&state().ui_mode.load(Ordering::Acquire)==2&&!result_scroll_state().lock().unwrap_or_else(|e|e.into_inner()).dragged {
                 let (_,y)=point_from_lparam(l); let dpi=dpi::window_dpi(hwnd).max(96)as i32; let row_height=56*dpi/96;
                 let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
@@ -827,9 +834,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             if w==VK_RETURN as usize||w==VK_SPACE as usize{
                 let focused=VIRTUAL_FOCUS;
+                if focused==ID_CANCEL&&virtual_buttons(hwnd).iter().any(|(id,_)|*id==ID_CANCEL){
+                    if physical_input{request_stop(hwnd);}else{record_blocked_stop();}
+                    return 0;
+                }
                 if state().ui_mode.load(Ordering::Acquire)==2&&(ID_FINDING_FIRST..ID_FINDING_FIRST+FINDING_CONTROL_COUNT).contains(&focused){virtual_accessibility::handle_action(hwnd,focused,true);return 0;}
                 if [ID_SETTINGS_GPU,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY].contains(&focused){settings_ui::activate_focused(hwnd);return 0;}
-                if virtual_buttons(hwnd).iter().any(|(id,_)|*id==VIRTUAL_FOCUS){activate_virtual_button(hwnd,VIRTUAL_FOCUS);return 0;}
+                if virtual_buttons(hwnd).iter().any(|(id,_)|*id==VIRTUAL_FOCUS){activate_input_button(hwnd,VIRTUAL_FOCUS,physical_input);return 0;}
             }
             if (VIRTUAL_FOCUS==202||VIRTUAL_FOCUS>=1000)&&state().ui_mode.load(Ordering::Acquire)==3&&(w==VK_UP as usize||w==VK_DOWN as usize){
                 let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());if !list.lines.is_empty(){let index=list.selected.unwrap_or(0);let next=if w==VK_UP as usize{index.saturating_sub(1)}else{(index+1).min(list.lines.len()-1)};list.selected=Some(next);let visible=12usize;if next<list.scroll{list.scroll=next;}else if next>=list.scroll+visible{list.scroll=next+1-visible;}drop(list);set_virtual_focus(hwnd,1000+next);}return 0;
@@ -868,10 +879,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             match w&0xffff {
                 ID_QUICK => start_scan(default_quick_paths(), true, 1, "正在快速扫描…"), ID_PROCESS => start_process_scan(), ID_SERVICE => start_service_scan(), ID_QUARANTINE => {PostMessageW(hwnd,WM_DEFERRED_NAVIGATE,PAGE_QUARANTINE,0);}, ID_CUSTOM => show_directory_input(hwnd)
                 , ID_REMEDIATE => remediate(hwnd), ID_RESTORE => restore_selected(hwnd), ID_REPORT => {PostMessageW(hwnd,WM_DEFERRED_NAVIGATE,PAGE_REPORT,0);}, ID_UPDATE => {PostMessageW(hwnd,WM_DEFERRED_NAVIGATE,PAGE_PROGRAM_UPDATE,0);}, ID_SETTINGS => {PostMessageW(hwnd,WM_DEFERRED_NAVIGATE,PAGE_SETTINGS,0);}, ID_CANCEL => {
-                    state().scan_cancel.store(true, Ordering:: Relaxed);
-                    scanner::interrupt_active_scan_io();
-                    state().progress_mode.store(3, Ordering:: Relaxed);
-                    append("\r\n正在立即停止扫描… \r\n");
+                    record_blocked_stop();
                 }
                 , ID_MORE => show_more_menu(hwnd), ID_DONE => {let mode=state().ui_mode.load(Ordering::Acquire);if mode==UI_MODE_REMEDIATION_DONE{state().remediation_complete.store(false,Ordering::Release);return_to_home(hwnd);}else{remediate(hwnd)}}, ID_SKIP => {
                     if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{settings_ui::reset();settings_ui::invalidate_all(hwnd);virtual_accessibility::announce_settings_reset(hwnd);}else if state().ui_mode.load(Ordering::Acquire)==UI_MODE_REMEDIATION_DONE{open_quarantine_page(hwnd);}else{return_to_home(hwnd);}
@@ -903,6 +911,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             state().scan_cancel.store(true, Ordering:: Relaxed);
             state().shutdown.store(true, Ordering:: Relaxed);
+            scanner::interrupt_active_scan_io();
+            input_guard::uninstall();
             audit::record("session","关闭窗口，取消正在运行的任务");
             KillTimer(hwnd,BUTTON_ANIMATION_TIMER);
             KillTimer(hwnd,PROGRESS_ANIMATION_TIMER);
@@ -968,11 +978,39 @@ unsafe fn custom_hit_test(hwnd: HWND, l: LPARAM) -> LRESULT {
 }
 unsafe fn activate_virtual_button(hwnd: HWND, id: usize) {
     if id==ID_CLOSE {
+        if state().working.load(Ordering::Acquire){record_blocked_stop();return;}
         state().allow_close.store(true,Ordering::SeqCst);
         SendMessageW(hwnd,WM_SYSCOMMAND,SC_CLOSE as usize,0);
     } else {
         SendMessageW(hwnd,WM_COMMAND,id|((BN_CLICKED as usize)<<16),0);
     }
+}
+unsafe fn activate_input_button(hwnd:HWND,id:usize,physical:bool){
+    if id==ID_CLOSE&&state().working.load(Ordering::Acquire){
+        if physical{
+            state().allow_close.store(true,Ordering::SeqCst);
+            SendMessageW(hwnd,WM_SYSCOMMAND,SC_CLOSE as usize,0);
+        }else{record_blocked_stop();}
+    }else{activate_virtual_button(hwnd,id);}
+}
+fn record_blocked_stop(){
+    // Avoid letting automated message floods fill the log or block the UI.
+    static LAST:OnceLock<Mutex<Option<Instant>>>=OnceLock::new();
+    let mut last=LAST.get_or_init(||Mutex::new(None)).lock().unwrap_or_else(|error|error.into_inner());
+    if last.is_none_or(|time|time.elapsed()>=Duration::from_secs(2)){
+        *last=Some(Instant::now());
+        audit::record("protection","已拦截自动化停止或关闭操作：缺少有效物理鼠标或键盘输入");
+    }
+}
+unsafe fn request_stop(hwnd:HWND){
+    let app=state();
+    if !app.working.load(Ordering::Acquire)||app.scan_cancel.swap(true,Ordering::AcqRel){return;}
+    scanner::interrupt_active_scan_io();
+    app.progress_mode.store(3,Ordering::Release);
+    *app.operation.lock().unwrap_or_else(|error|error.into_inner())="正在停止当前任务…".into();
+    *SCAN_PRESENTATION.get_or_init(||Mutex::new(None)).lock().unwrap_or_else(|error|error.into_inner())=None;
+    queue("正在立即停止当前任务…");
+    InvalidateRect(hwnd,null(),0);
 }
 unsafe fn configure_custom_frame(hwnd: HWND) {
     let margins = MARGINS {
@@ -1552,12 +1590,13 @@ unsafe fn paint_keyboard_focus(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
     let Some(rect)=rect else{return;};
     let gap=s(3).max(1);
     let rect=RECT{left:rect.left-gap,top:rect.top-gap,right:rect.right+gap,bottom:rect.bottom+gap};
+    if ui_rounding::enabled(){
+        ui_rounding::outline(dc,rect,0x00000000,s(7).max(1),s(2).max(1));
+        return;
+    }
     let pen=CreatePen(PS_SOLID,s(2).max(1),0x00000000);
     let old_pen=SelectObject(dc,pen);let old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
-    if ui_rounding::enabled(){
-        let corner=s(14).max(2);
-        windows_sys::Win32::Graphics::Gdi::RoundRect(dc,rect.left,rect.top,rect.right,rect.bottom,corner,corner);
-    }else{Rectangle(dc,rect.left,rect.top,rect.right,rect.bottom);}
+    Rectangle(dc,rect.left,rect.top,rect.right,rect.bottom);
     SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);
 }
 
@@ -2116,6 +2155,7 @@ unsafe fn start_scan(paths: Vec<ScanTarget>, include_processes: bool, progress_p
             }
         }
         *app.current_path.lock().unwrap_or_else(|error|error.into_inner())="正在加载已验证病毒库…".into();
+        let _io_thread=scanner::register_scan_io_thread();
         let scanner = match Scanner:: load(){Ok(x)=>x,Err(e)=>{queue(format!("规则加载失败，扫描未执行：{e}\r\n"));wait_for_scan_presentation(&app.scan_cancel);*app.operation.lock().unwrap_or_else(|error|error.into_inner())="扫描失败：病毒库不可用".into();app.progress_mode.store(3,Ordering::Release);app.ui_mode.store(2,Ordering::Release);app.working.store(false,Ordering::SeqCst);return;}};
         scanner.enable_session_dedup();
         queue(format!("规则 {} · {}\r\n", scanner.rule_version(),scanner.acceleration_status()));
@@ -2411,6 +2451,8 @@ unsafe fn remediate(hwnd:HWND){
         return;
     }
     if !claim_work(){return;}
+    state().scan_cancel.store(false,Ordering::Release);
+    scanner::reset_scan_cancellation();
     state().remediation_complete.store(false,Ordering::Release);
     state().remediation_total.store(count,Ordering::Relaxed);
     state().remediation_failed.store(0,Ordering::Relaxed);
@@ -2438,9 +2480,11 @@ unsafe fn remediate(hwnd:HWND){
                 return;
             }
         };
+        let _io_thread=scanner::register_scan_io_thread();
         let mut cleaned=0usize;
         let mut pending=0usize;
         for(position,finding)in candidates.into_iter().enumerate(){
+            if app.scan_cancel.load(Ordering::Acquire){queue("处理已停止。");break;}
             *app.current_path.lock().unwrap_or_else(|error|error.into_inner())=finding.path.display().to_string();
             queue(format!("[{}/{}] 正在复检 {}",position+1,count,finding.path.display()));
             // An abused host is cleaned without touching the host process: the finding's
@@ -2487,7 +2531,11 @@ unsafe fn remediate(hwnd:HWND){
                 app.progress_done.store(position+1,Ordering::Relaxed);
                 continue;
             }
-            let fresh=scanner.scan_file(&finding.path);
+            let Some(fresh)=scanner.scan_file_cancellable(&finding.path,&app.scan_cancel)else{
+                if app.scan_cancel.load(Ordering::Acquire){queue("处理已停止。");break;}
+                app.progress_done.store(position+1,Ordering::Relaxed);
+                continue;
+            };
             if fresh.sha256!=finding.sha256||!matches!(fresh.verdict,Verdict::Malicious|Verdict::Suspicious){
                 queue(format!("[{}/{}] 已跳过：文件已变化或复检结论改变",position+1,count));
                 app.progress_done.store(position+1,Ordering::Relaxed);
@@ -2498,6 +2546,7 @@ unsafe fn remediate(hwnd:HWND){
                 Err(error)=>{queue(format!("[{}/{}] 引用清理失败：{}",position+1,count,error));app.progress_done.store(position+1,Ordering::Relaxed);continue;}
             }
             if fresh.source!="quick-ci-policy"{
+            if app.scan_cancel.load(Ordering::Acquire){queue("处理已停止。");break;}
             stop_processes_before_quarantine_queued(&finding.path);
             match service_scan::remove_services_for_path(&finding.path){
                 Ok(messages)=>for message in messages{queue(format!("[{}/{}] {}",position+1,count,message));},

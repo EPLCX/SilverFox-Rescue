@@ -8,6 +8,7 @@ pub struct TerminationResult{pub pid:u32,pub error:Option<String>}
 
 pub fn terminate_matching_processes(expected:&Path)->Result<Vec<TerminationResult>>{
     if is_svchost_image(expected){return Ok(Vec::new());}
+    for error in crate::quarantine::enable_cleanup_privileges(){crate::audit::record("cleanup_privilege",&error);}
     let mut matches=Vec::new();unsafe{let snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);if snapshot==INVALID_HANDLE_VALUE{anyhow::bail!("无法创建进程快照：{}",std::io::Error::last_os_error());}let mut entry:PROCESSENTRY32W=std::mem::zeroed();entry.dwSize=size_of::<PROCESSENTRY32W>()as u32;let mut ok=Process32FirstW(snapshot,&mut entry);while ok!=0{let pid=entry.th32ProcessID;if pid>4&&pid!=std::process::id(){let image=query_process_path(pid);let direct=image.as_ref().map(|path|same_path(path,expected)).unwrap_or(false);if direct||process_loads_module(pid,expected){matches.push((pid,direct,image));}}ok=Process32NextW(snapshot,&mut entry);}CloseHandle(snapshot);}
     let windows=std::env::var("SystemRoot").unwrap_or_default().to_ascii_lowercase();let mut results=Vec::new();for(pid,direct,image)in matches{let protected_module=!direct&&image.as_ref().map(|path|path.to_string_lossy().to_ascii_lowercase().starts_with(&(windows.clone()+"\\"))).unwrap_or(false);let error=if protected_module{Some("目标作为模块加载在系统目录进程中，已跳过自动终止".into())}else{terminate_one(pid,image.as_deref().unwrap_or(expected)).err().map(|error|error.to_string())};results.push(TerminationResult{pid,error});}Ok(results)
 }
@@ -30,6 +31,7 @@ fn same_path(left:&Path,right:&Path)->bool{left.to_string_lossy().eq_ignore_asci
 /// processes are reported to the caller but deliberately not terminated.
 pub fn terminate_file_lockers(path:&Path)->Result<Vec<TerminationResult>>{
     use windows_sys::Win32::System::RestartManager::{RmEndSession,RmGetList,RmRegisterResources,RmStartSession,RM_PROCESS_INFO,CCH_RM_SESSION_KEY};
+    for error in crate::quarantine::enable_cleanup_privileges(){crate::audit::record("cleanup_privilege",&error);}
     let path_text:Vec<u16>=path.as_os_str().encode_wide().chain(Some(0)).collect();let files=[path_text.as_ptr()];let mut session=0u32;let mut key=[0u16;(CCH_RM_SESSION_KEY+1)as usize];let start=unsafe{RmStartSession(&mut session,0,key.as_mut_ptr())};if start!=0{anyhow::bail!("Restart Manager 会话启动失败：Windows 错误 {}",start);}
     let registered=unsafe{RmRegisterResources(session,1,files.as_ptr(),0,std::ptr::null(),0,std::ptr::null())};if registered!=0{unsafe{RmEndSession(session)};anyhow::bail!("Restart Manager 注册文件失败：Windows 错误 {}",registered);}
     let mut needed=0u32;let mut count=0u32;let mut reasons=0u32;let first=unsafe{RmGetList(session,&mut needed,&mut count,std::ptr::null_mut(),&mut reasons)};if first!=0&&first!=234{unsafe{RmEndSession(session)};anyhow::bail!("Restart Manager 查询占用者失败：Windows 错误 {}",first);}if needed==0{unsafe{RmEndSession(session)};return Ok(Vec::new());}

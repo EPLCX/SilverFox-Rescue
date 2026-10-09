@@ -60,3 +60,29 @@ unsafe fn fallback(dc:HDC,rect:RECT,fill:u32,border:Option<u32>){
         SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);
     }
 }
+
+/// Supersample an outline over a copy of the existing pixels, preserving the
+/// control's fill and text while smoothing the rounded focus ring.
+pub unsafe fn outline(dc:HDC,rect:RECT,color:u32,radius:i32,stroke:i32){
+    use windows_sys::Win32::Graphics::Gdi::{COLORONCOLOR,GetStockObject,NULL_BRUSH};
+    let width=rect.right-rect.left;let height=rect.bottom-rect.top;
+    if width<=0||height<=0{return;}
+    const SCALE:i32=4;
+    let memory=CreateCompatibleDC(dc);
+    if memory.is_null(){return;}
+    let bitmap=CreateCompatibleBitmap(dc,width*SCALE,height*SCALE);
+    if bitmap.is_null(){DeleteDC(memory);return;}
+    let old_bitmap=SelectObject(memory,bitmap);
+    SetStretchBltMode(memory,COLORONCOLOR);
+    StretchBlt(memory,0,0,width*SCALE,height*SCALE,dc,rect.left,rect.top,width,height,SRCCOPY);
+    let pen=CreatePen(PS_SOLID,stroke.max(1)*SCALE,color);
+    let old_pen=SelectObject(memory,pen);let old_brush=SelectObject(memory,GetStockObject(NULL_BRUSH));
+    let corner=radius.max(1)*2*SCALE;
+    let inset=stroke.max(1)*SCALE/2;
+    RoundRect(memory,inset,inset,width*SCALE-inset,height*SCALE-inset,corner,corner);
+    SelectObject(memory,old_brush);SelectObject(memory,old_pen);DeleteObject(pen);
+    let old_mode=SetStretchBltMode(dc,HALFTONE);
+    StretchBlt(dc,rect.left,rect.top,width,height,memory,0,0,width*SCALE,height*SCALE,SRCCOPY);
+    SetStretchBltMode(dc,old_mode);
+    SelectObject(memory,old_bitmap);DeleteObject(bitmap);DeleteDC(memory);
+}

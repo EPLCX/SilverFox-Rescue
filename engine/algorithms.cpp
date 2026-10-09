@@ -894,7 +894,7 @@ extern "C" __declspec(dllexport) double __cdecl sf_ml_probability_context(const 
     (void)path;(void)siblings;
     return ml_probability(sample,total_len,pe,true,nullptr,0);
 }
-extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.8.1";}
+extern "C" __declspec(dllexport) const char * __cdecl sf_engine_version() {return "2026.10.10.1";}
 
 #include "configuration_scan.h"
 

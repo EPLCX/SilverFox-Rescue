@@ -302,10 +302,7 @@ pub fn remove_services_for_path(path:&Path)->anyhow::Result<Vec<String>> {
     for target in enumerate_targets_for_cleanup()? {if !(target.system_host&&!target.registered_dll&&!target.runtime_module)&&target.path.to_string_lossy().eq_ignore_ascii_case(&wanted){names.insert(target.service);}}
     let mut result=Vec::new();
     for name in names {
-        let stop=Command::new("sc.exe").args(["stop",&name]).creation_flags(CREATE_NO_WINDOW).output();
-        match stop {Ok(output) if output.status.success()=>result.push(format!("服务 {} 已停止",name)),Ok(output)=>result.push(format!("服务 {} 停止返回 {}",name,output.status.code().unwrap_or(-1))),Err(error)=>result.push(format!("服务 {} 停止失败：{}",name,error))}
-        let delete=Command::new("sc.exe").args(["delete",&name]).creation_flags(CREATE_NO_WINDOW).output();
-        match delete {Ok(output) if output.status.success()=>result.push(format!("服务 {} 已删除",name)),Ok(output)=>result.push(format!("服务 {} 删除返回 {}",name,output.status.code().unwrap_or(-1))),Err(error)=>result.push(format!("服务 {} 删除失败：{}",name,error))}
+        result.extend(delete_service_by_name(&name)?);
     }
     Ok(result)
 }
@@ -361,15 +358,62 @@ fn sc_start(name:&str)->Vec<String>{
     }
 }
 
-/// Stop and delete one service by name: `sc stop` for the stop, `sc delete` for removal.
-fn delete_service_by_name(name:&str)->Vec<String>{
-    let mut result=sc_stop(name);
-    match Command::new("sc.exe").args(["delete",name]).creation_flags(CREATE_NO_WINDOW).output(){
-        Ok(output)if output.status.success()=>result.push(format!("服务 {} 注册已删除",name)),
-        Ok(output)=>result.push(format!("服务 {} 删除返回 {}",name,output.status.code().unwrap_or(-1))),
-        Err(error)=>result.push(format!("服务 {} 删除失败：{}",name,error)),
+/// Back up and disable the exact service before stopping it. SCM owns deferred deletion.
+fn delete_service_by_name(name:&str)->anyhow::Result<Vec<String>>{
+    use sha2::{Digest,Sha256};
+    use windows_sys::Win32::System::{Registry::RegSaveKeyW,Services::{ChangeServiceConfigW,DeleteService,SERVICE_CHANGE_CONFIG,SERVICE_DISABLED,SERVICE_NO_CHANGE}};
+    if name.trim().is_empty()||name.contains(['\\','/','\0']){anyhow::bail!("服务名无效");}
+    let mut result=crate::quarantine::enable_cleanup_privileges().into_iter().map(|error|format!("清理权限：{}",error)).collect::<Vec<_>>();
+    let service_name=wide(OsStr::new(name));
+    unsafe{
+        let manager=OpenSCManagerW(null(),null(),SC_MANAGER_CONNECT);
+        if manager.is_null(){anyhow::bail!("打开服务控制管理器失败：{}",std::io::Error::last_os_error());}
+        let service=OpenServiceW(manager,service_name.as_ptr(),SERVICE_CHANGE_CONFIG|SERVICE_STOP|SERVICE_QUERY_STATUS|0x00010000);
+        if service.is_null(){
+            let error=std::io::Error::last_os_error();CloseServiceHandle(manager);
+            if matches!(error.raw_os_error(),Some(1060|1072)){return Ok(vec![format!("服务 {} 已删除或已登记延迟删除",name)]);}
+            return Err(error.into());
+        }
+        let operation=(||->anyhow::Result<()>{
+            let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).ok_or_else(||anyhow::anyhow!("缺少 ProgramData"))?.join(r"SilverFoxRescue\repairs");
+            std::fs::create_dir_all(&backup)?;
+            let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+            let service_id=hex::encode(Sha256::digest(name.as_bytes()));
+            let hive=backup.join(format!("service-{}-{}.hiv",&service_id[..16],stamp));
+            let key_name=wide(OsStr::new(&format!(r"SYSTEM\CurrentControlSet\Services\{}",name)));let mut key=null_mut();
+            let opened=RegOpenKeyExW(HKEY_LOCAL_MACHINE,key_name.as_ptr(),0,KEY_READ,&mut key);
+            if opened!=0{anyhow::bail!("备份服务 {}：打开注册表失败，Windows 错误 {}",name,opened);}
+            let saved=RegSaveKeyW(key,wide(hive.as_os_str()).as_ptr(),null());RegCloseKey(key);
+            if saved!=0{anyhow::bail!("备份服务 {} 失败，Windows 错误 {}",name,saved);}
+            result.push(format!("服务 {} 配置已备份：{}",name,hive.display()));
+            if ChangeServiceConfigW(service,SERVICE_NO_CHANGE,SERVICE_DISABLED,SERVICE_NO_CHANGE,null(),null(),null_mut(),null(),null(),null(),null())==0{
+                anyhow::bail!("禁用服务 {} 失败：{}",name,std::io::Error::last_os_error());
+            }
+            result.push(format!("服务 {} 已禁用（Start=4）",name));
+            let mut status:SERVICE_STATUS=std::mem::zeroed();
+            if ControlService(service,1,&mut status)==0{
+                let error=std::io::Error::last_os_error();
+                if error.raw_os_error()!=Some(1062){result.push(format!("服务 {} 停止请求失败：{}；继续登记删除",name,error));}
+            }
+            let deadline=Instant::now()+Duration::from_secs(8);let mut stopped=false;
+            loop{
+                let mut current:SERVICE_STATUS_PROCESS=std::mem::zeroed();let mut needed=0;
+                if QueryServiceStatusEx(service,SC_STATUS_PROCESS_INFO,&mut current as *mut _ as *mut u8,size_of::<SERVICE_STATUS_PROCESS>()as u32,&mut needed)==0{break;}
+                if current.dwCurrentState==SERVICE_STOPPED{stopped=true;break;}
+                if Instant::now()>=deadline{break;}
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if DeleteService(service)==0{
+                let error=std::io::Error::last_os_error();
+                if error.raw_os_error()!=Some(1072){anyhow::bail!("服务 {} 已禁用，但登记删除失败：{}",name,error);}
+            }
+            result.push(if stopped{format!("服务 {} 已停止并登记删除；SCM 在最后一个服务句柄关闭后移除注册",name)}else{format!("服务 {} 已禁用并登记延迟删除，重启后由 SCM 完成清理",name)});
+            Ok(())
+        })();
+        CloseServiceHandle(service);CloseServiceHandle(manager);invalidate_service_cache();
+        operation?;
     }
-    result
+    Ok(result)
 }
 
 /// Cleanup for an abused service host.  **The host process is never ended**: one
@@ -393,7 +437,7 @@ pub fn clean_service_host_abuse(host_pid:u32,services:&[String])->anyhow::Result
         });
         if anomalous{
             log.push(format!("服务 {} 注册异常（映像缺失或间接启动未受信载荷），按持久化清除",name));
-            log.extend(delete_service_by_name(name));
+            log.extend(delete_service_by_name(name)?);
         }else{
             log.push(format!("服务 {} 注册本身正常，仅重启以清除宿主内可疑状态（宿主进程保持运行）",name));
             log.extend(sc_stop(name));
