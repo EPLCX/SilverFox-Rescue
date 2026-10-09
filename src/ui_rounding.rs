@@ -22,13 +22,13 @@ pub fn enabled()->bool{
 #[cfg(test)]
 pub fn simulate_windows_11(value:bool){TEST_WIN11.with(|flag|flag.set(value));}
 
-/// Paint the whole control at 4x resolution, then downsample its rounded
+/// Paint the whole control at 16x resolution, then downsample its rounded
 /// silhouette. The background is explicit so transparent corner pixels blend
 /// with the parent surface instead of leaving square GDI artifacts.
 pub unsafe fn control(dc:HDC,rect:RECT,fill:u32,border:Option<u32>,background:u32,radius:i32){
     let width=rect.right-rect.left;let height=rect.bottom-rect.top;
     if width<=0||height<=0{return;}
-    const SCALE:i32=4;
+    const SCALE:i32=16;
     let memory=CreateCompatibleDC(dc);
     if memory.is_null(){fallback(dc,rect,fill,border);return;}
     let bitmap=CreateCompatibleBitmap(dc,width*SCALE,height*SCALE);
@@ -67,7 +67,7 @@ pub unsafe fn outline(dc:HDC,rect:RECT,color:u32,radius:i32,stroke:i32){
     use windows_sys::Win32::Graphics::Gdi::{COLORONCOLOR,GetStockObject,NULL_BRUSH};
     let width=rect.right-rect.left;let height=rect.bottom-rect.top;
     if width<=0||height<=0{return;}
-    const SCALE:i32=4;
+    const SCALE:i32=16;
     let memory=CreateCompatibleDC(dc);
     if memory.is_null(){return;}
     let bitmap=CreateCompatibleBitmap(dc,width*SCALE,height*SCALE);

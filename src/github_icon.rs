@@ -35,7 +35,7 @@ pub(super) unsafe fn paint(dc:HDC,rect:RECT,color:u32){
     let width=rect.right-rect.left;
     let height=rect.bottom-rect.top;
     if width<=0||height<=0{return;}
-    let size=width.min(height)*4;
+    let size=width.min(height)*16;
     let memory=CreateCompatibleDC(dc);
     if memory.is_null(){return;}
     let bitmap=CreateCompatibleBitmap(dc,size,size);

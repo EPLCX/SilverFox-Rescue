@@ -1080,13 +1080,13 @@ unsafe fn paint_chrome(hwnd: HWND) {
     EndPaint(hwnd, &ps);
 }
 
-// Draw circular status marks on a 4x surface and downsample with HALFTONE.
+// Draw circular status marks on a 16x surface and downsample with HALFTONE.
 // Direct GDI Ellipse rendering is visibly jagged at the small sizes used by
 // the rescue box; the supersampled surface keeps the edge smooth on every DPI.
 unsafe fn paint_smooth_status_icon(dc:HDC,center_x:i32,center_y:i32,radius:i32,outline:u32,fill:u32,check:bool,failure:bool,dpi:i32){
     let bounds=RECT{left:center_x-radius,top:center_y-radius,right:center_x+radius,bottom:center_y+radius};
     if windows_sys::Win32::Graphics::Gdi::RectVisible(dc,&bounds)==0{return;}
-    let factor=4i32;
+    let factor=16i32;
     let diameter=radius*2;
     let memory=CreateCompatibleDC(dc);
     if memory.is_null(){return;}
