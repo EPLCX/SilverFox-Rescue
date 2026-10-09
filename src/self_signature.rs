@@ -46,67 +46,22 @@ pub(crate) fn signature_offset(bytes: &[u8]) -> Result<Option<usize>> {
     Ok(found)
 }
 
-// Schema 3: headers plus raw sections; Authenticode metadata and overlay are excluded.
-fn section_digest(bytes: &[u8], offset: usize) -> Option<([u8; 32], u64)> {
-    let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?));
-    let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?));
-    let pe = u32_at(0x3c)? as usize;
-    let count = u16_at(pe.checked_add(6)?)? as usize;
-    let optional_size = u16_at(pe.checked_add(20)?)? as usize;
-    let optional = pe.checked_add(24)?;
-    let table = optional.checked_add(optional_size)?;
-    let end = table.checked_add(count.checked_mul(40)?)?;
-    let directory = match u16_at(optional)? { 0x10b => 96, 0x20b => 112, _ => return None };
-    if optional_size < directory { return None; }
-    let mut headers = bytes.get(..end)?.to_vec();
-    headers.get_mut(optional + 64..optional + 68)?.fill(0);
-    if u32_at(optional + directory - 4)? >= 5 {
-        if optional_size < directory + 40 { return None; }
-        headers.get_mut(optional + directory + 32..optional + directory + 40)?.fill(0);
-    }
+fn signed_message(bytes: &[u8], offset: usize, domain: &[u8]) -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(&headers);
-    let mut covered = end as u64;
-    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(count);
-    for index in 0..count {
-        let h = table + index * 40;
-        let size = u32_at(h + 16)? as usize;
-        if size == 0 { continue; }
-        let start = u32_at(h + 20)? as usize;
-        let stop = start.checked_add(size)?;
-        if start < end || stop > bytes.len() || ranges.iter().any(|&(a, b)| start < b && a < stop) { return None; }
-        ranges.push((start, stop));
-        if start <= offset && offset.checked_add(128)? <= stop {
-            hash.update(&bytes[start..offset]);
-            hash.update([0u8; 128]);
-            hash.update(&bytes[offset + 128..stop]);
-        } else { hash.update(&bytes[start..stop]); }
-        covered += size as u64;
-    }
-    Some((hash.finalize().into(), covered))
-}
-
-fn signed_message(bytes: &[u8], offset: usize, domain: &[u8]) -> Result<Vec<u8>> {
-    let (digest, covered) = if bytes[offset + 8] == 3 {
-        section_digest(bytes, offset).context("PE 节区摘要范围无效")?
-    } else {
-        let mut hash = Sha256::new();
-        hash.update(&bytes[..offset]);
-        hash.update([0u8; SLOT_SIZE]);
-        hash.update(&bytes[offset + SLOT_SIZE..]);
-        (hash.finalize().into(), bytes.len() as u64)
-    };
+    hash.update(&bytes[..offset]);
+    hash.update([0u8; SLOT_SIZE]);
+    hash.update(&bytes[offset + SLOT_SIZE..]);
     let mut message = Vec::with_capacity(domain.len() + 8 + 32);
     message.extend_from_slice(domain);
-    message.extend_from_slice(&covered.to_le_bytes());
-    message.extend_from_slice(&digest);
-    Ok(message)
+    message.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    message.extend_from_slice(&hash.finalize());
+    message
 }
 
 pub(crate) fn engine_version_hint(bytes: &[u8]) -> Option<&str> {
     let offset = signature_offset(bytes).ok()??;
     let slot = bytes.get(offset..offset + SLOT_SIZE)?;
-    if !matches!(slot[8], 2 | 3) || slot[9..12] != [0; 3] { return None; }
+    if slot[8] != 2 || slot[9..12] != [0; 3] { return None; }
     let len = slot[108] as usize;
     if !(1..=19).contains(&len) || slot[109 + len..].iter().any(|byte| *byte != 0) { return None; }
     let version = std::str::from_utf8(&slot[109..109 + len]).ok()?;
@@ -121,7 +76,7 @@ pub(crate) fn verify_with_domain(bytes: &[u8], public_key: &[u8], domain: &[u8])
     }
     match slot[8] {
         1 if slot[108..] == [0; 20] => {},
-        2 | 3 if domain.starts_with(ENGINE_DOMAIN) => {
+        2 if domain.starts_with(ENGINE_DOMAIN) => {
             let version = engine_version_hint(bytes).context("算法 DLL 签名版本无效")?;
             let mut expected = ENGINE_DOMAIN.to_vec();
             expected.extend_from_slice(version.as_bytes());expected.push(0);
@@ -131,7 +86,7 @@ pub(crate) fn verify_with_domain(bytes: &[u8], public_key: &[u8], domain: &[u8])
     }
     if domain == DOMAIN && slot[8] != 1 { bail!("算法 DLL 签名不能充当程序签名"); }
     if public_key.len() != 32 { bail!("程序签名公钥无效"); }
-    let message = signed_message(bytes, offset, domain)?;
+    let message = signed_message(bytes, offset, domain);
     if slot[12..44] != message[domain.len() + 8..] { bail!("PE 文件内容哈希不匹配"); }
     UnparsedPublicKey::new(&ED25519, public_key)
         .verify(&message, &slot[44..108])

@@ -55,11 +55,11 @@ def signature_offset(data: bytes) -> int:
         raise ValueError("expected exactly one .sfsig section")
     offset = matches[0]
     slot = data[offset:offset + SLOT_SIZE]
-    if slot[:8] != MAGIC or slot[9:12] != bytes(3) or slot[8] not in (1, 2, 3):
+    if slot[:8] != MAGIC or slot[9:12] != bytes(3) or slot[8] not in (1, 2):
         raise ValueError("invalid signature slot")
     if slot[8] == 1 and slot[108:] != bytes(20):
         raise ValueError("invalid signature slot padding")
-    if slot[8] in (2, 3):
+    if slot[8] == 2:
         engine_version(data, offset)
     return offset
 
@@ -67,7 +67,7 @@ def signature_offset(data: bytes) -> int:
 def engine_version(data: bytes, offset: int) -> str:
     slot = data[offset:offset + SLOT_SIZE]
     length = slot[108]
-    if slot[8] not in (2, 3) or not 1 <= length <= 19 or any(slot[109 + length:128]):
+    if slot[8] != 2 or not 1 <= length <= 19 or any(slot[109 + length:128]):
         raise ValueError("invalid engine version slot")
     value = slot[109:109 + length].decode("ascii")
     if not all(ch.isdigit() or ch == "." for ch in value):
@@ -75,63 +75,18 @@ def engine_version(data: bytes, offset: int) -> str:
     return value
 
 
-def section_digest(data: bytes, offset: int) -> tuple[bytes, int]:
-    """Hash PE headers and raw sections, ignoring Authenticode metadata/overlay."""
-    pe = struct.unpack_from("<I", data, 0x3C)[0]
-    count = struct.unpack_from("<H", data, pe + 6)[0]
-    optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-    optional = pe + 24
-    table = optional + optional_size
-    end = table + count * 40
-    magic = struct.unpack_from("<H", data, optional)[0]
-    directory = {0x10B: 96, 0x20B: 112}.get(magic)
-    if directory is None or optional_size < directory:
-        raise ValueError("invalid PE optional header")
-    headers = bytearray(data[:end])
-    headers[optional + 64:optional + 68] = bytes(4)
-    directories = struct.unpack_from("<I", data, optional + directory - 4)[0]
-    if directories >= 5:
-        if optional_size < directory + 40:
-            raise ValueError("missing PE certificate directory")
-        security = optional + directory + 32
-        headers[security:security + 8] = bytes(8)
-    digest = hashlib.sha256(headers)
-    covered = end
-    ranges = []
-    for index in range(count):
-        size, start = struct.unpack_from("<II", data, table + index * 40 + 16)
-        if not size:
-            continue
-        stop = start + size
-        if start < end or stop > len(data) or any(start < b and a < stop for a, b in ranges):
-            raise ValueError("invalid or overlapping PE section")
-        ranges.append((start, stop))
-        if start <= offset and offset + SLOT_SIZE <= stop:
-            digest.update(data[start:offset])
-            digest.update(bytes(SLOT_SIZE))
-            digest.update(data[offset + SLOT_SIZE:stop])
-        else:
-            digest.update(data[start:stop])
-        covered += size
-    return digest.digest(), covered
-
-
 def signed_message(data: bytes, offset: int, kind: str = "engine", version: str | None = None) -> tuple[bytes, bytes]:
-    if data[offset + 8] == 3:
-        digest, covered = section_digest(data, offset)
-    else:
-        digest = hashlib.sha256(data[:offset] + bytes(SLOT_SIZE) + data[offset + SLOT_SIZE:]).digest()
-        covered = len(data)
+    digest = hashlib.sha256(data[:offset] + bytes(SLOT_SIZE) + data[offset + SLOT_SIZE:]).digest()
     if kind == "engine" and version and version.isascii() and len(version) <= 128:
         domain = ENGINE_DOMAIN + version.encode("ascii") + b"\0"
     else:
         raise ValueError("engine signing requires a short ASCII rule version")
-    return domain + struct.pack("<Q", covered) + digest, digest
+    return domain + struct.pack("<Q", len(data)) + digest, digest
 
 
 def verify(data: bytes, public_key: Ed25519PublicKey, kind: str = "engine", version: str | None = None) -> None:
     offset = signature_offset(data)
-    if kind == "engine" and data[offset + 8] in (2, 3):
+    if kind == "engine" and data[offset + 8] == 2:
         embedded = engine_version(data, offset)
         if version is not None and embedded != version:
             raise ValueError("engine signature version mismatch")
@@ -154,7 +109,7 @@ def sign_bytes(data: bytes, key: Ed25519PrivateKey, public_key: Ed25519PublicKey
         if not version or len(version) > 19 or not all(ch.isdigit() or ch == "." for ch in version):
             raise ValueError("engine rule version must be 1-19 ASCII digits or dots")
         data = bytearray(data)
-        data[offset + 8] = 3
+        data[offset + 8] = 2
         data[offset + 108:offset + 128] = bytes(20)
         data[offset + 108] = len(version)
         data[offset + 109:offset + 109 + len(version)] = version.encode("ascii")

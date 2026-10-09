@@ -4,8 +4,6 @@ EXE 不再预留 `.sfsig` 自签名区段，启动时不读取自身文件验签
 
 `algorithms.dll` 保留独立的 `.sfsig` 节区，使用规则私钥签名，签名域绑定规则版本。规则包下载时验签，在调用 `LoadLibraryExW` 前再次验证 DLL 身份。验证器支持 PE 签名槽和尾部身份签名两种格式。项目签名采用 Ed25519，Windows Authenticode 状态由独立流程检查。
 
-新签名槽使用 schema 3：摘要覆盖 PE 头及全部区段原始数据，将内部签名槽置零，并忽略 PE 校验和、证书目录及区段外尾部数据。因此在内部签名之后添加 Windows Authenticode 签名，不会改变内部摘要。旧 schema 2 的整文件签名继续按原格式验证；已有 DLL 需重新内部签名才能获得新行为。代码、资源及节表修改仍会使验签失败。
-
 机器学习模型将文件或 ZIP/MSI 成员判为可疑或恶意后，扫描器仍可用有效的算法 DLL 身份签名豁免该文件。
 
 统一交互入口：
@@ -14,7 +12,7 @@ EXE 不再预留 `.sfsig` 自签名区段，启动时不读取自身文件验签
 python tools\sign_program.py
 ```
 
-发行顺序：编译 DLL、内部签名 DLL、添加 Windows 代码签名、生成规则包、编译 EXE、生成程序 ZIP 与签名更新清单。程序 ZIP 内的文件名、ZIP 摘要及更新清单签名格式保持原样。
+发行顺序：编译并签名 DLL、生成规则包、编译 EXE、生成程序 ZIP 与签名更新清单。程序 ZIP 内的文件名、ZIP 摘要及更新清单签名格式保持原样。
 
 构建脚本从 `SILVERFOX_KEY_DIR`（默认 `releaseSecrets`）读取 `rules-public.hex` 和 `program-public.hex`。规则公钥验证规则包及 DLL，程序公钥验证程序更新包。私钥仅由发布工具读取。`SILVERFOX_DIST_DIR` 可调整输出目录。
 
