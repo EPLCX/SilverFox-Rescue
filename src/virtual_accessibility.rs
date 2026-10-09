@@ -44,7 +44,7 @@ pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
         let heading=match mode{0=>"银狐专杀急救箱".to_string(),1=>visible_scan_operation(),2=>{let count=state().threat_count.load(Ordering::Relaxed);if count==0{"未发现威胁".into()}else{format!("发现 {count} 个威胁")}},3=>match subpage{PAGE_QUARANTINE=>"隔离区",PAGE_REPORT=>"扫描报告",PAGE_UPDATE=>"规则更新",PAGE_SETTINGS=>"设置与保护状态",PAGE_PROGRAM_UPDATE=>"程序更新",_=>"功能页面"}.into(),UI_MODE_REMEDIATION_DONE=>"扫描结果".into(),_=>String::new()};
         if !heading.is_empty(){result.push(item(ID_PAGE_HEADING,heading,ROLE_SYSTEM_TEXT,if mode==0{RECT{left:s(24),top:s(145),right:client.right-s(24),bottom:s(205)}}else if mode==1{scan_text_rects(&client,dpi).0}else{RECT{left:s(24),top:s(58),right:client.right-s(24),bottom:s(100)}},false));}
         if mode==0{let operation=state().operation.lock().unwrap_or_else(|error|error.into_inner()).clone();let subtitle=if operation.starts_with("扫描成功")||operation.starts_with("扫描完成")||operation.starts_with("扫描已取消"){operation}else{"快速查杀银狐木马".into()};result.push(item(ID_PAGE_DETAIL,subtitle,ROLE_SYSTEM_TEXT,RECT{left:s(24),top:s(210),right:client.right-s(24),bottom:s(245)},false));}
-        result.push(item(ID_VERSION_TEXT,version_footer_text(),ROLE_SYSTEM_TEXT,RECT{left:s(24),top:client.bottom-s(45),right:s(360).min(client.right-s(24)),bottom:client.bottom},false));
+        result.push(item(ID_VERSION_TEXT,version_footer_text(),ROLE_SYSTEM_TEXT,RECT{left:s(64),top:client.bottom-s(45),right:s(400).min(client.right-s(24)),bottom:client.bottom},false));
         if mode==1{
             result.push(item(ID_PAGE_DETAIL,scan_status_summary(),ROLE_SYSTEM_PROGRESSBAR,scan_text_rects(&client,dpi).1,false));
             for (index,line) in visible_scan_activity().into_iter().enumerate(){result.push(item(ID_PAGE_ACTIVITY+index,line,ROLE_SYSTEM_TEXT,RECT{left:s(46),top:s(162+index as i32*27),right:client.right-s(46),bottom:s(187+index as i32*27)},false));}
@@ -62,7 +62,7 @@ pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
         }
         if mode==UI_MODE_REMEDIATION_DONE{result.push(item(ID_PAGE_DETAIL,state().operation.lock().unwrap_or_else(|error|error.into_inner()).clone(),ROLE_SYSTEM_TEXT,RECT{left:s(24),top:s(168),right:client.right-s(24),bottom:s(210)},false));}
     }
-    for (id,rect) in virtual_buttons(hwnd){let name=match id{ID_MINIMIZE=>"最小化".into(),ID_CLOSE=>"关闭".into(),ID_QUICK=>"开始快速扫描".into(),ID_CANCEL=>"停止扫描".into(),ID_MORE=>"功能菜单".into(),ID_DONE=>if mode==UI_MODE_REMEDIATION_DONE{"完成".into()}else{"立即处理已勾选".into()},ID_SKIP=>if mode==3&&subpage==PAGE_SETTINGS{"恢复默认".into()}else if mode==UI_MODE_REMEDIATION_DONE{"查看隔离区".into()}else{"暂不处理".into()},ID_BACK=>"返回".into(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".into(),ID_DIRECTORY_CANCEL=>"取消".into(),ID_DIRECTORY_SCAN=>"扫描".into(),ID_CUSTOM=>"自定义扫描".into(),ID_PROCESS=>"仅扫描进程".into(),ID_SERVICE=>"仅扫描服务".into(),ID_QUARANTINE=>"隔离区".into(),ID_REPORT=>"扫描报告".into(),ID_UPDATE=>"更新规则".into(),ID_SETTINGS=>"设置与状态".into(),_=>String::new()};result.push(item(id,name,ROLE_SYSTEM_PUSHBUTTON,rect,true));}
+    for (id,rect) in virtual_buttons(hwnd){let name=match id{ID_MINIMIZE=>"最小化".into(),ID_CLOSE=>"关闭".into(),ID_GITHUB=>"GitHub 项目页面".into(),ID_QUICK=>"开始快速扫描".into(),ID_CANCEL=>"停止扫描".into(),ID_MORE=>"功能菜单".into(),ID_DONE=>if mode==UI_MODE_REMEDIATION_DONE{"完成".into()}else{"立即处理已勾选".into()},ID_SKIP=>if mode==3&&subpage==PAGE_SETTINGS{"恢复默认".into()}else if mode==UI_MODE_REMEDIATION_DONE{"查看隔离区".into()}else{"暂不处理".into()},ID_BACK=>"返回".into(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".into(),ID_DIRECTORY_CANCEL=>"取消".into(),ID_DIRECTORY_SCAN=>"扫描".into(),ID_CUSTOM=>"自定义扫描".into(),ID_PROCESS=>"仅扫描进程".into(),ID_SERVICE=>"仅扫描服务".into(),ID_QUARANTINE=>"隔离区".into(),ID_REPORT=>"扫描报告".into(),ID_UPDATE=>"更新规则".into(),ID_SETTINGS=>"设置与状态".into(),_=>String::new()};result.push(item(id,name,ROLE_SYSTEM_PUSHBUTTON,rect,true));}
     result
 }
 
@@ -166,6 +166,7 @@ pub(super) fn focus_description(id:usize,mode:usize,subpage:usize)->Option<&'sta
         ID_DIRECTORY_CANCEL=>"关闭目录输入框。",
         ID_MINIMIZE=>"将程序窗口最小化到任务栏。",
         ID_CLOSE=>"关闭程序窗口。",
+        ID_GITHUB=>"使用默认浏览器打开 GitHub 项目页面。",
         _=>return None,
     })
 }

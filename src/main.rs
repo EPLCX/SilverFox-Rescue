@@ -2,6 +2,7 @@
 use anyhow::Context;
 use sha2::Digest;
 mod engine_host;
+mod github_icon;
 mod gpu_scan;
 mod model;
 mod protection;
@@ -82,6 +83,7 @@ const ID_SERVICE: usize = 117;
 const ID_DELETE_ALL: usize = 118;
 const ID_MINIMIZE: usize = 119;
 const ID_CLOSE: usize = 120;
+const ID_GITHUB: usize = 121;
 const ID_PAGE_HEADING: usize = 340;
 const ID_PAGE_DETAIL: usize = 341;
 const ID_PAGE_STATUS: usize = 342;
@@ -875,6 +877,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 }
                 , ID_PAGE_ACTION => {PostMessageW(hwnd,WM_DEFERRED_ACTION,0,0);}
                 , ID_DELETE_ALL => delete_all_quarantine(hwnd)
+                , ID_GITHUB => {
+                    let result=ShellExecuteW(hwnd,wide("open").as_ptr(),wide("https://github.com/EPLCX/SilverFox-Rescue").as_ptr(),null(),null(),SW_SHOWNORMAL);
+                    if (result as isize)<=32{MessageBoxW(hwnd,wide("打开默认浏览器失败，请访问 https://github.com/EPLCX/SilverFox-Rescue").as_ptr(),wide("打开 GitHub 失败").as_ptr(),MB_OK|MB_ICONERROR);}
+                }
                 , ID_MINIMIZE => {SendMessageW(hwnd,WM_SYSCOMMAND,SC_MINIMIZE as usize,0);}
                 , ID_CLOSE => {} // A synthetic WM_COMMAND is not an authorized close action.
                 , ID_DIRECTORY_CANCEL => set_directory_input_active(hwnd,false)
@@ -1209,7 +1215,7 @@ unsafe fn version_footer_rect(dc:HDC,client:&RECT,dpi:i32)->RECT{
     let mut extent=SIZE{cx:0,cy:0};
     GetTextExtentPoint32W(dc,text.as_ptr(),(text.len()-1)as i32,&mut extent);
     SelectObject(dc,old);
-    RECT{left:24*dpi/96,top:client.bottom-45*dpi/96,right:(24*dpi/96+extent.cx).min(client.right-24*dpi/96),bottom:client.bottom}
+    RECT{left:64*dpi/96,top:client.bottom-45*dpi/96,right:(64*dpi/96+extent.cx).min(client.right-24*dpi/96),bottom:client.bottom}
 }
 
 unsafe fn paint_progress(dc:HDC,client:&RECT,dpi:i32){
@@ -1298,6 +1304,13 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
     if item.is_null() { return; }
     let item = &*item;
     let id = item.CtlID as usize;
+    if id==ID_GITHUB{
+        let dpi=dpi::window_dpi(item.hwndItem).max(96)as i32;
+        let inset=5*dpi/96;
+        let mut icon=item.rcItem;icon.left+=inset;icon.top+=inset;icon.right-=inset;icon.bottom-=inset;
+        github_icon::paint(item.hDC,icon,if item.itemState&(ODS_HOTLIGHT|ODS_SELECTED)as u32!=0{BLUE}else{0x00505050});
+        return;
+    }
     if id==ID_MINIMIZE||id==ID_CLOSE {
         let hovered=item.itemState&ODS_HOTLIGHT as u32!=0;
         let active=hovered;
@@ -1378,6 +1391,7 @@ unsafe fn virtual_buttons(hwnd:HWND)->Vec<(usize,RECT)>{
         buttons.push((ID_DIRECTORY_SCAN,RECT{left:left+width-s(94),top:top+s(164),right:left+width-s(28),bottom:top+s(202)}));
         return buttons;
     }
+    buttons.push((ID_GITHUB,RECT{left:s(24),top:client.bottom-s(38),right:s(56),bottom:client.bottom-s(6)}));
     let mode=state().ui_mode.load(Ordering::Acquire);
     let subpage=state().subpage.load(Ordering::Acquire);
     let rect=|x:i32,y:i32,w:i32,h:i32|RECT{left:x,top:y,right:x+w,bottom:y+h};
