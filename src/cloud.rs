@@ -13,6 +13,16 @@ pub fn https_agent()->anyhow::Result<&'static ureq::Agent>{
 }
 
 pub fn startup_connection_failure(error:&anyhow::Error,probe:impl FnOnce()->bool)->bool{
+    // A bad clock can invalidate both the update server and the HTTPS probe.
+    // Match the TLS error type directly, including rustls errors wrapped in IO.
+    let certificate_failed=error.chain().any(|cause|{
+        let tls=cause.downcast_ref::<ureq::rustls::Error>().or_else(||
+            cause.downcast_ref::<std::io::Error>()
+                .and_then(|error|error.get_ref())
+                .and_then(|inner|inner.downcast_ref::<ureq::rustls::Error>()));
+        matches!(tls,Some(ureq::rustls::Error::InvalidCertificate(_)))
+    });
+    if certificate_failed{return true;}
     let connection_failed=error.chain().any(|cause|cause.downcast_ref::<ureq::Error>().is_some_and(|error|
         matches!(error.kind(),ureq::ErrorKind::Dns|ureq::ErrorKind::ConnectionFailed|ureq::ErrorKind::Io)));
     connection_failed&&probe()
@@ -184,6 +194,14 @@ mod network_diagnostics {
 
 #[cfg(test)]mod startup_connection_tests{
     use super::*;
+    #[test]fn certificate_validity_failures_block_without_connectivity_probe(){
+        for reason in [ureq::rustls::CertificateError::NotValidYet,ureq::rustls::CertificateError::Expired]{
+            let tls=ureq::rustls::Error::InvalidCertificate(reason);
+            let transport:ureq::Error=std::io::Error::new(std::io::ErrorKind::InvalidData,tls).into();
+            let error=anyhow::Error::new(transport).context("update manifest failed");
+            assert!(startup_connection_failure(&error,||panic!("certificate failures must block without probing")));
+        }
+    }
     #[test]fn online_connection_failure_blocks_and_offline_failure_continues(){
         let transport:ureq::Error=std::io::Error::new(std::io::ErrorKind::TimedOut,"update connection timed out").into();
         let error=anyhow::Error::new(transport).context("update manifest failed");

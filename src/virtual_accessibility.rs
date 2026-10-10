@@ -80,6 +80,7 @@ pub(super) unsafe fn items(hwnd:HWND)->Vec<Item>{
         if mode==UI_MODE_REMEDIATION_DONE{result.push(item(ID_PAGE_DETAIL,state().operation.lock().unwrap_or_else(|error|error.into_inner()).clone(),ROLE_SYSTEM_TEXT,RECT{left:s(24),top:s(168),right:client.right-s(24),bottom:s(210)},false));}
     }
     for (id,rect) in virtual_buttons(hwnd){let name=match id{ID_MINIMIZE=>"最小化".into(),ID_CLOSE=>"关闭".into(),ID_GITHUB=>"GitHub 项目页面".into(),ID_QUICK=>"开始快速扫描".into(),ID_CANCEL=>"停止扫描".into(),ID_MORE=>"功能菜单".into(),ID_DONE=>if mode==UI_MODE_REMEDIATION_DONE{"完成".into()}else{"立即处理已勾选".into()},ID_SKIP=>if mode==3&&subpage==PAGE_SETTINGS{"恢复默认".into()}else if mode==UI_MODE_REMEDIATION_DONE{"查看隔离区".into()}else{"暂不处理".into()},ID_BACK=>"返回".into(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".into(),ID_DIRECTORY_CANCEL=>"取消".into(),ID_DIRECTORY_SCAN=>"扫描".into(),ID_CUSTOM=>"自定义扫描".into(),ID_PROCESS=>"仅扫描进程".into(),ID_SERVICE=>"仅扫描服务".into(),ID_QUARANTINE=>"隔离区".into(),ID_REPORT=>"扫描报告".into(),ID_UPDATE=>"更新规则".into(),ID_SETTINGS=>"设置与状态".into(),_=>String::new()};result.push(item(id,name,ROLE_SYSTEM_PUSHBUTTON,rect,true));}
+    for entry in &mut result{entry.rect=page_transition::display_rect(entry.id,entry.rect);}
     result
 }
 

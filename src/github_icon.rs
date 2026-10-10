@@ -34,7 +34,7 @@ const CURVES:&[[f64;6]]=&[
 pub(super) unsafe fn paint(dc:HDC,rect:RECT,color:u32){
     let width=rect.right-rect.left;
     let height=rect.bottom-rect.top;
-    if width<=0||height<=0{return;}
+    if width<=0||height<=0||RectVisible(dc,&rect)==0{return;}
     let size=width.min(height)*16;
     let memory=CreateCompatibleDC(dc);
     if memory.is_null(){return;}

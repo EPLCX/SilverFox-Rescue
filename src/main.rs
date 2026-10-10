@@ -26,6 +26,7 @@ mod ui_rounding;
 mod dpi;
 mod virtual_accessibility;
 mod input_guard;
+mod input_devices;
 mod prompt_box;
 use model:: {
     Finding, Verdict
@@ -117,7 +118,7 @@ const WM_SETTINGS_SAVED: u32 = WM_APP + 0x45;
 const WM_AUTOMATION_WARNING:u32=WM_APP+0x48;
 const WM_PROGRAM_UPDATE_STATE: u32 = WM_APP + 0x46;
 const WM_STARTUP_CONNECTION_FAILED:u32=WM_APP+0x47;
-const BUTTON_ANIMATION_TIMER:usize=0x5346;
+const BUTTON_ANIMATION_TIMER:usize=0x534A;// 必须与 ACCESSIBILITY_TIMER(0x5346) 等其它定时器 ID 不同，否则 WM_TIMER 会被其它分支截获
 const BUTTON_ANIMATION_MS:u64=150;
 const PROGRESS_ANIMATION_TIMER:usize=0x5347;
 const SCAN_UPDATE_PRESENTATION:Duration=Duration::from_secs(1);
@@ -213,6 +214,9 @@ static mut KEYBOARD_FOCUS_VISIBLE:bool=false;
 static mut VIRTUAL_HOT:usize=0;
 static mut VIRTUAL_PRESSED:usize=0;
 static mut VIRTUAL_MENU_OPEN:bool=false;
+static mut MENU_ANIMATION_STARTED:Option<Instant>=None;
+const MENU_ANIMATION_TIMER:usize=0x5349;
+const MENU_ANIMATION_DURATION:Duration=Duration::from_millis(200);
 struct ButtonTone { from:u32, to:u32, started:Instant }
 impl ButtonTone {
     fn color_at(&self,now:Instant)->u32{
@@ -479,18 +483,34 @@ fn accessible_text_enabled()->bool{
     ACCESSIBLE_TEXT_ENABLED.load(Ordering::Acquire)
 }
 static ACCESSIBLE_TEXT_ENABLED:AtomicBool=AtomicBool::new(false);
-static ACCESSIBILITY_REFRESH_MS:AtomicUsize=AtomicUsize::new(0);
-fn refresh_accessible_text(force:bool)->bool{
-    let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()as usize;
-    if !force&&now.saturating_sub(ACCESSIBILITY_REFRESH_MS.load(Ordering::Relaxed))<1000{return accessible_text_enabled();}
-    ACCESSIBILITY_REFRESH_MS.store(now,Ordering::Relaxed);
+const ACCESSIBILITY_TIMER:usize=0x5346;
+const ACCESSIBILITY_INTERVAL_MS:u32=1500;
+static SCREEN_READER_CACHE:Mutex<(Option<Instant>,bool)>=Mutex::new((None,false));
+fn refresh_accessible_text(settings_changed:bool)->bool{
     let enabled=match settings::load().hide_controls.as_str(){
         "enabled"=>false,
         "disabled"=>true,
-        _=>screen_reader_active(),
+        _=>{
+            let mut cache=SCREEN_READER_CACHE.lock().unwrap_or_else(|error|error.into_inner());
+            let now=Instant::now();
+            // Settings refreshes use the cached result. Even repeated timer
+            // messages cannot cause registry enumeration more than once/1500ms.
+            if cache.0.is_none()||(!settings_changed&&cache.0.is_some_and(|last|now.saturating_duration_since(last)>=Duration::from_millis(ACCESSIBILITY_INTERVAL_MS as u64))){
+                cache.0=Some(now);cache.1=screen_reader_active();
+            }
+            cache.1
+        },
     };
     ACCESSIBLE_TEXT_ENABLED.store(enabled,Ordering::Release);
     enabled
+}
+unsafe fn refresh_accessibility_window(hwnd:HWND,settings_changed:bool){
+    let accessible=refresh_accessible_text(settings_changed);
+    if LAST_ACCESSIBLE_TEXT!=Some(accessible){
+        LAST_ACCESSIBLE_TEXT=Some(accessible);
+        SetWindowTextW(hwnd,wide(if accessible{"银狐专杀急救箱"}else{""}).as_ptr());
+        apply_dpi_layout(hwnd,true);InvalidateRect(hwnd,null(),0);
+    }
 }
 
 fn state() -> &'static Arc<AppState> {
@@ -553,13 +573,14 @@ fn publish_findings(app:&AppState,findings:Vec<Finding>){
 fn requires_manual_selection(source:&str)->bool{source.starts_with("service-host-advisory:")}
 fn default_selected_indices()->HashSet<usize>{state().findings.lock().unwrap_or_else(|error|error.into_inner()).iter().enumerate().filter_map(|(index,finding)|(finding.verdict==Verdict::Malicious&&!requires_manual_selection(&finding.source)).then_some(index)).collect()}
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    // 颜色、按下和焦点反馈与动作一样先取得输入凭据；未通过时不产生任何视觉变化。
     let physical_input=!input_guard::protection_enabled()||input_guard::physical_message(hwnd,msg,w,l);
     if input_guard::is_control_input(msg)&&IsWindowEnabled(hwnd)==0{return 0;}
     if input_guard::is_control_input(msg)&&!physical_input{
-        // Navigation/modifier/text keys do not request a protection exception.
+        // 导航/修饰/文本键不请求保护例外，只有真正的按钮激活才提示。
         let activation=matches!(msg,WM_LBUTTONDOWN|WM_LBUTTONUP)&&virtual_hover_at(hwnd,l as i16 as i32,(l>>16)as i16 as i32)!=0
             ||matches!(msg,WM_KEYDOWN|WM_SYSKEYDOWN)&&matches!(w as u16,VK_RETURN|VK_SPACE)&&VIRTUAL_FOCUS!=0;
-        if activation{input_guard::schedule_auto_prompt();}
+        if activation&&input_guard::rejected_automation(){input_guard::schedule_auto_prompt();}
         if msg==WM_LBUTTONUP{let pressed=VIRTUAL_PRESSED;VIRTUAL_PRESSED=0;ReleaseCapture();if pressed!=0{invalidate_virtual_control(hwnd,pressed);}}
         record_blocked_control();return 0;
     }
@@ -572,6 +593,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_NCCALCSIZE => custom_frame_client(hwnd,w,l), WM_CREATE => {
             input_guard::register_main_window(hwnd);
             input_guard::configure(&settings::load().input_protection);
+            input_guard::apply_protection_state(hwnd);
             let accessible=refresh_accessible_text(true);
             LAST_ACCESSIBLE_TEXT=Some(accessible);
             SetWindowTextW(hwnd,wide(if accessible{"银狐专杀急救箱"}else{""}).as_ptr());
@@ -579,6 +601,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             // child HWND is created, including in screen-reader mode.
             apply_dpi_layout(hwnd, true);
             configure_custom_frame(hwnd);
+            SetTimer(hwnd,ACCESSIBILITY_TIMER,ACCESSIBILITY_INTERVAL_MS,None);
             let refresh_state=Arc::clone(state());let refresh_hwnd=hwnd as isize;
             std::thread::spawn(move||{while !refresh_state.shutdown.load(Ordering::Acquire){let interval=if refresh_state.working.load(Ordering::Acquire){100}else{750};std::thread::sleep(Duration::from_millis(interval));if !refresh_state.shutdown.load(Ordering::Acquire){unsafe{PostMessageW(refresh_hwnd as HWND,WM_REFRESH_CLOCK,0,0);}}}});
             if !cfg!(test){match protection:: activate() {
@@ -588,13 +611,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 }
                 , Err(error) => append(&format!("自我保护降级：{}\r\n", error))
             }}
-            if !input_guard::install(){audit::record("protection","停止操作输入钩子安装失败：仅接受具有有效物理输入凭据的停止操作");}
             0
         }
+        WM_TIMER if w==ACCESSIBILITY_TIMER => {if IsWindowEnabled(hwnd)!=0{refresh_accessibility_window(hwnd,false);}0}
         WM_TIMER if w==RESULT_SCROLL_TIMER => {animate_result_scroll(hwnd);0}
         WM_TIMER if w==BUTTON_ANIMATION_TIMER => {repaint_animated_buttons(hwnd);0}
         WM_TIMER if w==PROGRESS_ANIMATION_TIMER => {animate_progress(hwnd);0}
         WM_TIMER if w==page_transition::TIMER => {page_transition::tick(hwnd);0}
+        WM_TIMER if w==MENU_ANIMATION_TIMER => {
+            if !VIRTUAL_MENU_OPEN||IsIconic(hwnd)!=0||MENU_ANIMATION_STARTED.map_or(true,|started|started.elapsed()>=MENU_ANIMATION_DURATION){
+                MENU_ANIMATION_STARTED=None;KillTimer(hwnd,MENU_ANIMATION_TIMER);
+            }
+            InvalidateRect(hwnd,null(),0);0
+        }
         WM_GESTURENOTIFY => {
             use windows_sys::Win32::{UI::Input::Touch::*,System::SystemServices::{GC_PAN,GC_PAN_WITH_SINGLE_FINGER_VERTICALLY,GC_PAN_WITH_INERTIA}};
             let config=GESTURECONFIG{dwID:GID_PAN,dwWant:GC_PAN|GC_PAN_WITH_SINGLE_FINGER_VERTICALLY|GC_PAN_WITH_INERTIA,dwBlock:0};
@@ -632,13 +661,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 InvalidateRect(hwnd,&footer,0);
             }
             drop(last_footer);
-            let accessible=refresh_accessible_text(false);
-            if LAST_ACCESSIBLE_TEXT!=Some(accessible){
-                LAST_ACCESSIBLE_TEXT=Some(accessible);
-                SetWindowTextW(hwnd,wide(if accessible{"银狐专杀急救箱"}else{""}).as_ptr());
-                apply_dpi_layout(hwnd,true);
-                InvalidateRect(hwnd,null(),0);
-            }
             if FORCED_UPDATE.load(Ordering::Acquire)&&!FORCED_UPDATE_PAGE_SHOWN.swap(true,Ordering::AcqRel){
                 input_guard::post_internal(hwnd,WM_DEFERRED_NAVIGATE,PAGE_PROGRAM_UPDATE,0);
             }
@@ -663,9 +685,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_STARTUP_CONNECTION_FAILED => {
             if let Some(error)=STARTUP_CONNECTION_ERROR.get(){
                 audit::record("startup_error",error);
+                ShowWindow(hwnd,SW_HIDE);
                 // Show the error before WM_DESTROY posts WM_QUIT, which can end
                 // the message box's modal loop before the user sees it.
-                prompt_box::message_box_w(hwnd,wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}\r\n\r\n系统日期、时间不正确也会导致 HTTPS 证书验证失败，请检查并校准系统时间后重试。")).as_ptr(),wide("更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
+                prompt_box::message_box_w(hwnd,wide(&format!("更新服务器连接或 HTTPS 证书验证失败，程序已停止启动。\r\n\r\n{error}\r\n\r\n请检查系统日期、时间和时区。时间早于证书生效日期或晚于证书失效日期时，请校准系统时间后重试。")).as_ptr(),wide("启动更新检查失败").as_ptr(),MB_OK|MB_ICONERROR);
                 state().allow_close.store(true,Ordering::SeqCst);
                 DestroyWindow(hwnd);
             }
@@ -680,8 +703,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
         WM_SETTINGS_SAVED => {
             input_guard::configure(&settings::load().input_protection);
-            let accessible=refresh_accessible_text(true);
-            if LAST_ACCESSIBLE_TEXT!=Some(accessible){LAST_ACCESSIBLE_TEXT=Some(accessible);SetWindowTextW(hwnd,wide(if accessible{"银狐专杀急救箱"}else{""}).as_ptr());apply_dpi_layout(hwnd,true);}
+            input_guard::apply_protection_state(hwnd);
+            refresh_accessibility_window(hwnd,true);
             0
         }
         WM_DEFERRED_NAVIGATE => {
@@ -708,7 +731,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_AUTOMATION_WARNING=>{
             if input_guard::take_internal(hwnd,msg,w,l).is_none()||!input_guard::auto_prompt_pending(){return 0;}
             if IsWindowEnabled(hwnd)==0{input_guard::finish_auto_prompt(false);return 0;}
-            let result=prompt_box::named(hwnd,"“控件保护”用于拦截其他程序模拟点击、按键或调用自动化接口操作本程序，防止恶意软件停止扫描、修改设置或关闭窗口。\r\n\r\n刚才有一次控件操作未通过输入校验，已被拦截。如果你正在使用可信的远程桌面、辅助工具或自动化工具，并且确实需要它操作本程序，可以选择“关闭本次保护”；本机鼠标、键盘可以正常操作时，建议选择“取消”。\r\n\r\n关闭后，其他程序（包括恶意软件）也可能模拟操作来停止扫描、改变设置或关闭本程序。仅在你确认需要使用可信工具时关闭。\r\n\r\n“关闭本次保护”只影响本次运行，设置仍为“自动”，下次启动恢复保护。选择“取消”会保留保护，本次运行不再询问。","控件保护",MB_OKCANCEL|MB_ICONWARNING|MB_SETFOREGROUND|MB_DEFBUTTON2|prompt_box::PROTECT,&[(IDYES,"关闭本次保护"),(IDCANCEL,"取消")]);
+            let result=prompt_box::named(hwnd,"刚才有一次操作未通过输入校验，已被拦截。\r\n\r\n此保护用于阻止其他程序模拟点击、按键或调用自动化接口，防止恶意软件停止扫描、修改设置或关闭本程序。\r\n\r\n如果你正在使用可信的远程桌面、辅助工具或自动化工具操作本程序，可以选择“关闭本次保护”。如果你正在本机用鼠标、键盘操作，请选择“保持保护”。\r\n\r\n关闭保护后，其他程序（包括恶意软件）也可能模拟操作，停止扫描、更改设置或关闭本程序。请仅在确认需要时关闭。\r\n\r\n“关闭本次保护”仅在本次运行内有效，设置项仍为“自动”，下次启动将恢复保护。\r\n选择“保持保护”后，本次运行不再提示。","控件保护",MB_OKCANCEL|MB_ICONWARNING|MB_SETFOREGROUND|MB_DEFBUTTON2|prompt_box::PROTECT,&[(IDYES,"关闭本次保护"),(IDCANCEL,"保持保护")]);
             input_guard::finish_auto_prompt(result==IDYES);audit::record("protection",if result==IDYES{"用户选择关闭本次运行的控件保护"}else{"保留控件保护，本次运行不再询问"});0
         }
         WM_SIZE => {
@@ -760,6 +783,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             0
         }
         WM_MOUSEMOVE => {
+            if !physical_input{if VIRTUAL_HOT!=0{let previous=VIRTUAL_HOT;VIRTUAL_HOT=0;invalidate_virtual_control(hwnd,previous);}return 0;}
             let mut track=TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>()as u32,dwFlags:TME_LEAVE,hwndTrack:hwnd,dwHoverTime:0};TrackMouseEvent(&mut track);
             let (x,y)=point_from_lparam(l);
             let next=virtual_hover_at(hwnd,x,y);
@@ -799,8 +823,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     InvalidateRect(hwnd,null(),0);
                 }else{set_virtual_focus(hwnd,button);}
             } else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{
+                let x=x-page_transition::content_offset();
                 if settings_ui::click(hwnd,x,y){SetFocus(hwnd);if let Some(index)=settings_ui::field_rects(hwnd).iter().position(|rect|rect_contains(rect,x,y)){let id=[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index];set_virtual_focus(hwnd,id);if index!=1{virtual_accessibility::announce_setting(hwnd,id);}}}
             } else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{
+                let x=x-page_transition::content_offset();
                 let dpi=dpi::window_dpi(hwnd).max(96)as i32;let s=|v:i32|v*dpi/96;
                 let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
                 if x>=s(24)&&x<client.right-s(24)&&y>=s(105)&&y<client.bottom-s(140){
@@ -848,12 +874,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             if VIRTUAL_MENU_OPEN&&(w==VK_UP as usize||w==VK_DOWN as usize){let current=MENU_IDS.iter().position(|id|*id==VIRTUAL_FOCUS);let next=match current{Some(current)if w==VK_UP as usize=>(current+MENU_IDS.len()-1)%MENU_IDS.len(),Some(current)=>(current+1)%MENU_IDS.len(),None if w==VK_UP as usize=>MENU_IDS.len()-1,None=>0};set_virtual_focus(hwnd,MENU_IDS[next]);return 0;}
             if directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
                 if w==VK_ESCAPE as usize{set_directory_input_active(hwnd,false);}
-                else if w==VK_RETURN as usize{if VIRTUAL_FOCUS==ID_DIRECTORY_CANCEL{set_directory_input_active(hwnd,false);}else if VIRTUAL_FOCUS==ID_MINIMIZE||VIRTUAL_FOCUS==ID_CLOSE{activate_input_button(hwnd,VIRTUAL_FOCUS,physical_input);}else{submit_directory_input(hwnd);}}
+                else if w==VK_RETURN as usize{if VIRTUAL_FOCUS==ID_DIRECTORY_CANCEL{set_directory_input_active(hwnd,false);}else if VIRTUAL_FOCUS==ID_MINIMIZE||VIRTUAL_FOCUS==ID_CLOSE{activate_input_button(hwnd,VIRTUAL_FOCUS,physical_input);}else if !physical_input&&input_guard::protection_enabled(){record_blocked_control();}else{submit_directory_input(hwnd);}}
                 else if VIRTUAL_FOCUS==ID_DIRECTORY_INPUT&&w==b'V' as usize&&GetKeyState(VK_CONTROL as i32)<0{paste_directory_input(hwnd);}
                 return 0;
             }
             if w==VK_RETURN as usize||w==VK_SPACE as usize{
                 let focused=VIRTUAL_FOCUS;
+                if !physical_input&&input_guard::protection_enabled(){
+                    if input_guard::rejected_automation(){input_guard::schedule_auto_prompt();}
+                    record_blocked_control();return 0;
+                }
                 if focused==ID_CANCEL&&virtual_buttons(hwnd).iter().any(|(id,_)|*id==ID_CANCEL){
                     request_stop(hwnd);
                     return 0;
@@ -939,8 +969,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             scanner::interrupt_active_scan_io();
             input_guard::uninstall();
             audit::record("session","关闭窗口，取消正在运行的任务");
+            KillTimer(hwnd,ACCESSIBILITY_TIMER);
             KillTimer(hwnd,BUTTON_ANIMATION_TIMER);
             KillTimer(hwnd,PROGRESS_ANIMATION_TIMER);
+            KillTimer(hwnd,MENU_ANIMATION_TIMER);
+            MENU_ANIMATION_STARTED=None;
             page_transition::clear(hwnd);
             paint_cache::clear();
             button_tones().lock().unwrap_or_else(|error|error.into_inner()).retain(|(window,_),_|*window!=hwnd as isize);
@@ -1014,7 +1047,10 @@ unsafe fn dispatch_control_command(hwnd:HWND,id:usize,physical:bool,guarded:bool
     input_guard::send_command(hwnd,id|((BN_CLICKED as usize)<<16));true
 }
 unsafe fn activate_input_button(hwnd:HWND,id:usize,physical:bool){
-    if !physical&&input_guard::protection_enabled(){record_blocked_control();return;}
+    if !physical&&input_guard::protection_enabled(){
+        if input_guard::rejected_automation(){input_guard::schedule_auto_prompt();}
+        record_blocked_control();return;
+    }
     if id==ID_CLOSE{
         state().allow_close.store(true,Ordering::SeqCst);
         SendMessageW(hwnd,WM_SYSCOMMAND,SC_CLOSE as usize,0);
@@ -1084,7 +1120,13 @@ unsafe fn paint_chrome(hwnd: HWND) {
     let memory_dc=paint_cache::surface(screen_dc,client.right,client.bottom);
     let mode=state().ui_mode.load(Ordering::Acquire);
     let subpage=if mode==3{state().subpage.load(Ordering::Acquire)}else{0};
-    let transitioning=memory_dc!=screen_dc&&page_transition::begin_frame(hwnd,memory_dc,&client,title_height(hwnd),(mode,subpage));
+    let dpi=dpi::window_dpi(hwnd).max(96)as i32;
+    let controls=virtual_buttons(hwnd).into_iter().map(|(id,rect)|
+        page_transition::Control{id,rect,label:virtual_button_label(id)}).collect();
+    let mut transitioning=memory_dc!=screen_dc&&page_transition::begin_frame(hwnd,memory_dc,&client,title_height(hwnd),dpi,(mode,subpage),controls);
+    if VIRTUAL_MENU_OPEN||directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
+        page_transition::finish(hwnd);transitioning=false;
+    }
     let saved=windows_sys::Win32::Graphics::Gdi::SaveDC(memory_dc);
     let dc=if saved==0{screen_dc}else{memory_dc};
     let dirty=if transitioning{client}else{ps.rcPaint};
@@ -1102,7 +1144,6 @@ unsafe fn paint_chrome(hwnd: HWND) {
     if !UI_FONT.is_null() {
         SelectObject(dc, UI_FONT);
     }
-    let dpi = dpi::window_dpi(hwnd).max(96)as i32;
     let title_text = RECT {
         left: 14*dpi/96, top: 0, right: minimize.left, bottom: title.bottom
     }
@@ -1112,8 +1153,8 @@ unsafe fn paint_chrome(hwnd: HWND) {
     paint_page(dc, hwnd, &client, dpi);
     paint_virtual_controls(dc,hwnd,&client,dpi);
     paint_directory_input(dc,hwnd,&client,dpi);
-    paint_keyboard_focus(dc,hwnd,&client,dpi);
     if dc!=screen_dc{page_transition::blend(hwnd,dc);}
+    paint_keyboard_focus(dc,hwnd,&client,dpi);
     if saved!=0{windows_sys::Win32::Graphics::Gdi::RestoreDC(memory_dc,saved);}
     if dc!=screen_dc{BitBlt(screen_dc,dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top,dc,dirty.left,dirty.top,SRCCOPY);}
     EndPaint(hwnd, &ps);
@@ -1425,11 +1466,15 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
         return;
     }
     let primary = id==ID_QUICK||id==ID_DONE||id==ID_CANCEL||id==ID_PAGE_ACTION;
+    let text=wide(&virtual_button_label(id));
+    draw_shared_button(item,&text,primary,UI_FONT);
+}
+
+fn virtual_button_label(id:usize)->String{
     let current_mode=state().ui_mode.load(Ordering::Acquire);
     let terminal_no_threat=current_mode==UI_MODE_REMEDIATION_DONE&&state().remediation_total.load(Ordering::Relaxed)==0;
     let label=match id {ID_QUICK=>"开始快速扫描".to_string(),ID_CANCEL=>"停止扫描".to_string(),ID_MORE=>"功能菜单".to_string(),ID_DONE=>if current_mode==UI_MODE_REMEDIATION_DONE{"完成".to_string()}else{"立即处理已勾选".to_string()},ID_SKIP=>if current_mode==3&&state().subpage.load(Ordering::Relaxed)==PAGE_SETTINGS{"恢复默认".to_string()}else if current_mode==UI_MODE_REMEDIATION_DONE&& !terminal_no_threat{"查看隔离区".to_string()}else{"暂不处理".to_string()},ID_BACK=>"返回".to_string(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".to_string(),_=>String::new()};
-    let text=wide(&label);
-    draw_shared_button(item,&text,primary,UI_FONT);
+    label
 }
 
 // Main window and message boxes use this exact control implementation.
@@ -1515,7 +1560,12 @@ unsafe fn menu_layout(hwnd:HWND,client:&RECT,dpi:i32)->(i32,i32,i32){
     let s=|v:i32|v*dpi/96;
     let home=state().ui_mode.load(Ordering::Acquire)==0;
     let width=s(if home{160}else{208});
-    let left=client.right-s(if home{184}else{232});
+    // Share the animated position between painting, hit testing and focus.
+    let remaining=MENU_ANIMATION_STARTED.map_or(0.0,|started|{
+        let t=(started.elapsed().as_secs_f32()/MENU_ANIMATION_DURATION.as_secs_f32()).clamp(0.0,1.0);
+        1.0-page_transition::ease(t)
+    });
+    let left=client.right-s(if home{184}else{232})+(s(16)as f32*remaining).round()as i32;
     // Keep the popup attached to its trigger on every page. Its rows overlay
     // nearby page actions while open, as a normal transient menu does.
     let trigger_top=client.bottom-s(43);
@@ -1524,7 +1574,7 @@ unsafe fn menu_layout(hwnd:HWND,client:&RECT,dpi:i32)->(i32,i32,i32){
 }
 
 unsafe fn virtual_button_at(hwnd:HWND,x:i32,y:i32)->usize{
-    virtual_buttons(hwnd).into_iter().rev().find_map(|(id,rect)|rect_contains(&rect,x,y).then_some(id)).unwrap_or(0)
+    virtual_buttons(hwnd).into_iter().rev().find_map(|(id,rect)|rect_contains(&page_transition::display_rect(id,rect),x,y).then_some(id)).unwrap_or(0)
 }
 
 unsafe fn invalidate_virtual_control(hwnd:HWND,id:usize){
@@ -1537,6 +1587,7 @@ unsafe fn virtual_hover_at(hwnd:HWND,x:i32,y:i32)->usize{
     if button!=0{return button;}
     if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS
         &&!directory_input().lock().unwrap_or_else(|error|error.into_inner()).active{
+        let x=x-page_transition::content_offset();
         if let Some(index)=settings_ui::field_rects(hwnd).iter().position(|rect|rect_contains(rect,x,y)){
             return [ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index];
         }
@@ -1994,6 +2045,12 @@ unsafe fn announce_scan_result(hwnd:HWND){
 
 
 unsafe fn show_more_menu(hwnd: HWND) {
+    if !VIRTUAL_MENU_OPEN{
+        MENU_ANIMATION_STARTED=None;
+        if page_transition::enabled()&&IsIconic(hwnd)==0&&SetTimer(hwnd,MENU_ANIMATION_TIMER,16,None)!=0{
+            MENU_ANIMATION_STARTED=Some(Instant::now());
+        }
+    }
     VIRTUAL_MENU_OPEN=true;
     set_virtual_focus(hwnd,MENU_IDS[0]);
     InvalidateRect(hwnd,null(),0);
@@ -3228,6 +3285,7 @@ fn main() {
         }
         ;
         RegisterClassW(&wc);
+        input_devices::start();
     let hwnd = CreateWindowExW(WS_EX_APPWINDOW, cls.as_ptr(), wide("").as_ptr(), MAIN_WINDOW_STYLE, CW_USEDEFAULT, CW_USEDEFAULT, 600*dpi/96, 450*dpi/96, null_mut(), null_mut(), instance, null());
         if hwnd.is_null() {
             if com_result>=0{CoUninitialize();}
@@ -3247,7 +3305,6 @@ fn main() {
         if !debug_program_update_page{check_program_update_on_startup(hwnd);}
         let mut m: MSG = std:: mem:: zeroed();
         while GetMessageW(&mut m, null_mut(), 0, 0)>0 {
-            TranslateMessage(&m);
             input_guard::dispatch_message(&m);
         }
         if com_result>=0{CoUninitialize();}

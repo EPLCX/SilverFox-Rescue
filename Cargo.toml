@@ -24,6 +24,7 @@ ctr = "0.9"
 winapi = { version = "0.3", features = ["d3d11", "d3dcommon", "dxgi", "dxgiformat", "winerror", "combaseapi", "objbase", "shobjidl", "shobjidl_core", "shlobj", "knownfolders"] }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
   "Win32_Security",
@@ -51,6 +52,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_Controls",
   "Win32_UI_Accessibility",
   "Win32_UI_HiDpi",
+  "Win32_UI_Input",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Input_Touch",
   "Win32_UI_Shell",

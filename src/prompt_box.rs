@@ -41,6 +41,7 @@ const FOCUS_NOTIFICATION:u32=WM_APP+0x60;
 fn readable(value:&[u16])->String{String::from_utf16_lossy(&value[..value.iter().position(|value|*value==0).unwrap_or(value.len())])}
 fn focus_id(dialog:&Dialog,index:usize)->usize{if index<dialog.buttons.len(){dialog.buttons[index].id as usize}else if index==dialog.buttons.len(){CONTENT_ID}else{CLOSE_ID}}
 fn focus_rect(dialog:&Dialog,index:usize)->RECT{if index<dialog.buttons.len(){dialog.buttons[index].rect}else if index==dialog.buttons.len(){dialog.text_rect}else{dialog.close_rect}}
+
 unsafe fn invalidate_control(hwnd:HWND,dialog:&Dialog,index:usize){
     let mut rect=focus_rect(dialog,index);let gap=(5*crate::dpi::window_dpi(hwnd).max(96)as i32/96).max(1);
     InflateRect(&mut rect,gap,gap);InvalidateRect(hwnd,&rect,0);
@@ -92,8 +93,17 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
     // Snapshot input evidence before focus/capture/accessibility callbacks can
     // enter another message dispatch and change the current message metadata.
     let physical_input=dialog.flags&PROTECT==0||crate::input_guard::physical_message(hwnd,msg,w,l);
+    if crate::input_guard::is_control_input(msg)&&!physical_input{
+        let x=l as i16 as i32;let y=(l>>16)as i16 as i32;
+        let exempt=matches!(msg,WM_LBUTTONDOWN|WM_LBUTTONUP)&&dialog.buttons.iter().enumerate().any(|(index,button)|inside(&button.rect,x,y)&&!protected(dialog,index))
+            ||matches!(msg,WM_KEYDOWN|WM_SYSKEYDOWN)&&matches!(w as u16,VK_RETURN|VK_SPACE)&&!protected(dialog,dialog.focus.get());
+        if !exempt{
+            if msg==WM_LBUTTONUP{ReleaseCapture();if let Some(index)=dialog.pressed.replace(None){invalidate_control(hwnd,dialog,index);}}
+            crate::record_blocked_control();return 0;
+        }
+    }
     match msg{
-        WM_CREATE=>{register_accessibility(hwnd,dialog);crate::configure_custom_frame(hwnd);0}
+        WM_CREATE=>{crate::input_guard::set_prompt_protected(hwnd,dialog.flags&PROTECT!=0);crate::input_devices::register(hwnd);register_accessibility(hwnd,dialog);crate::configure_custom_frame(hwnd);0}
         WM_ACTIVATE|WM_DWMCOMPOSITIONCHANGED|WM_SIZE=>{
             let result=DefWindowProcW(hwnd,msg,w,l);crate::configure_custom_frame(hwnd);result
         }
@@ -115,7 +125,7 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             dialog.focus_pending.set(false);let index=dialog.focus.get();
             if dialog.last_announced.replace(Some(index))!=Some(index){crate::virtual_accessibility::notify_focus(hwnd,focus_id(dialog,index));}0
         }
-        WM_NCDESTROY=>{KillTimer(hwnd,crate::BUTTON_ANIMATION_TIMER);crate::button_tones().lock().unwrap_or_else(|error|error.into_inner()).retain(|(window,_),_|*window!=hwnd as isize);crate::virtual_accessibility::unregister_prompt(hwnd);SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);DefWindowProcW(hwnd,msg,w,l)}
+        WM_NCDESTROY=>{crate::input_guard::set_prompt_protected(hwnd,false);KillTimer(hwnd,crate::BUTTON_ANIMATION_TIMER);crate::button_tones().lock().unwrap_or_else(|error|error.into_inner()).retain(|(window,_),_|*window!=hwnd as isize);crate::virtual_accessibility::unregister_prompt(hwnd);SetWindowLongPtrW(hwnd,GWLP_USERDATA,0);DefWindowProcW(hwnd,msg,w,l)}
         crate::virtual_accessibility::ACTION_MESSAGE|crate::virtual_accessibility::FOCUS_MESSAGE=>{
             if crate::input_guard::take_internal(hwnd,msg,w,l).is_none(){return 0;}
             if IsWindowEnabled(hwnd)==0{return 0;}
@@ -158,6 +168,7 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             if !memory.is_null(){DeleteDC(memory);}EndPaint(hwnd,&ps);0
         }
         WM_MOUSEMOVE=>{
+            if !physical_input{if let Some(index)=dialog.hot.replace(None){invalidate_control(hwnd,dialog,index);}return 0;}
             let mut track=TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>()as u32,dwFlags:TME_LEAVE,hwndTrack:hwnd,dwHoverTime:0};TrackMouseEvent(&mut track);
             let x=l as i16 as i32;let y=(l>>16)as i16 as i32;
             let next=dialog.buttons.iter().position(|button|inside(&button.rect,x,y)).or_else(||inside(&dialog.close_rect,x,y).then_some(dialog.buttons.len()+1));
@@ -240,8 +251,10 @@ unsafe fn show(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs:Vec<(i32,
     if !owner.is_null()&&IsWindowEnabled(owner)!=0{EnableWindow(owner,0);disabled.push(owner);}
     else if owner.is_null()&&flags&MB_TASKMODAL!=0{EnumThreadWindows(GetCurrentThreadId(),Some(disable_task_window),&mut disabled as *mut Vec<HWND>as isize);}
     let had_hooks=crate::input_guard::hooks_present();
+    let previous_raw_target=crate::input_devices::target();
     let names=specs.into_iter().map(|(id,label)|(id,label.to_owned())).collect();
     let result=show_on_thread(owner,text,title,flags,names);
+    crate::input_devices::register(previous_raw_target);
     if !had_hooks{crate::input_guard::uninstall();}
     for window in disabled{if IsWindow(window)!=0{EnableWindow(window,1);}}
     if !owner.is_null()&&IsWindow(owner)!=0{
@@ -284,7 +297,7 @@ unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs
         let received=GetMessageW(&mut msg,null_mut(),0,0);
         if received==0{quit=Some(msg.wParam as i32);break;}
         if received<0{break;}
-        TranslateMessage(&msg);crate::input_guard::dispatch_message(&msg);
+        crate::input_guard::dispatch_message(&msg);
     }
     if IsWindow(hwnd)!=0{DestroyWindow(hwnd);}
     if let Some(code)=quit{PostQuitMessage(code);}

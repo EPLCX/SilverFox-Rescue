@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use windows_sys::Win32::{Foundation::RECT,Graphics::Gdi::{CreateCompatibleBitmap,CreateCompatibleDC,CreatePen,CreateSolidBrush,DeleteDC,DeleteObject,FillRect,RoundRect,SelectObject,SetStretchBltMode,StretchBlt,HDC,HALFTONE,PS_SOLID,SRCCOPY}};
+use windows_sys::Win32::{Foundation::RECT,Graphics::Gdi::*};
 
 #[repr(C)]
 struct OsVersionInfo { size:u32,major:u32,minor:u32,build:u32,platform:u32,service_pack:[u16;128] }
@@ -22,67 +22,84 @@ pub fn enabled()->bool{
 #[cfg(test)]
 pub fn simulate_windows_11(value:bool){TEST_WIN11.with(|flag|flag.set(value));}
 
-/// Paint the whole control at 16x resolution, then downsample its rounded
-/// silhouette. The background is explicit so transparent corner pixels blend
-/// with the parent surface instead of leaving square GDI artifacts.
+/// Straight areas need no supersampling. Keep 16x rendering only at the
+/// rounded corners, including the explicit parent background.
 pub unsafe fn control(dc:HDC,rect:RECT,fill:u32,border:Option<u32>,background:u32,radius:i32){
     let width=rect.right-rect.left;let height=rect.bottom-rect.top;
-    if width<=0||height<=0{return;}
-    const SCALE:i32=16;
-    let memory=CreateCompatibleDC(dc);
-    if memory.is_null(){fallback(dc,rect,fill,border);return;}
-    let bitmap=CreateCompatibleBitmap(dc,width*SCALE,height*SCALE);
-    if bitmap.is_null(){DeleteDC(memory);fallback(dc,rect,fill,border);return;}
-    let old_bitmap=SelectObject(memory,bitmap);
-    let base=CreateSolidBrush(background);
-    let surface=RECT{left:0,top:0,right:width*SCALE,bottom:height*SCALE};
-    FillRect(memory,&surface,base);DeleteObject(base);
-    let brush=CreateSolidBrush(fill);
-    let pen=CreatePen(PS_SOLID,if border.is_some(){SCALE}else{1},border.unwrap_or(fill));
-    let old_brush=SelectObject(memory,brush);let old_pen=SelectObject(memory,pen);
-    let inset=if border.is_some(){SCALE/2}else{1};
-    let corner=radius.clamp(1,(width.min(height)/2).max(1))*2*SCALE;
-    RoundRect(memory,inset,inset,width*SCALE-inset,height*SCALE-inset,corner,corner);
-    SelectObject(memory,old_pen);SelectObject(memory,old_brush);
-    DeleteObject(pen);DeleteObject(brush);
-    let prior_mode=SetStretchBltMode(dc,HALFTONE);
-    StretchBlt(dc,rect.left,rect.top,width,height,memory,0,0,width*SCALE,height*SCALE,SRCCOPY);
-    SetStretchBltMode(dc,prior_mode);
-    SelectObject(memory,old_bitmap);DeleteObject(bitmap);DeleteDC(memory);
+    if width<=0||height<=0||RectVisible(dc,&rect)==0{return;}
+    fill_area(dc,rect,fill);
+    if let Some(color)=border{straight_edges(dc,rect,color,1,0,0);}
+    corners(dc,rect,radius.clamp(1,(width.min(height)/2).max(1)),1,Some((fill,background)),border);
 }
 
-unsafe fn fallback(dc:HDC,rect:RECT,fill:u32,border:Option<u32>){
-    let brush=CreateSolidBrush(fill);FillRect(dc,&rect,brush);DeleteObject(brush);
-    if let Some(color)=border{
-        let pen=CreatePen(PS_SOLID,1,color);let old_pen=SelectObject(dc,pen);
-        let old_brush=SelectObject(dc,windows_sys::Win32::Graphics::Gdi::GetStockObject(windows_sys::Win32::Graphics::Gdi::NULL_BRUSH));
-        windows_sys::Win32::Graphics::Gdi::Rectangle(dc,rect.left,rect.top,rect.right-1,rect.bottom-1);
-        SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);
-    }
+unsafe fn fill_area(dc:HDC,rect:RECT,color:u32){
+    if rect.right<=rect.left||rect.bottom<=rect.top{return;}
+    let brush=CreateSolidBrush(color);FillRect(dc,&rect,brush);DeleteObject(brush);
 }
 
-/// Supersample an outline over a copy of the existing pixels, preserving the
-/// control's fill and text while smoothing the rounded focus ring.
+unsafe fn straight_edges(dc:HDC,rect:RECT,color:u32,stroke:i32,corner_width:i32,corner_height:i32){
+    let areas=[
+        RECT{left:rect.left+corner_width,top:rect.top,right:rect.right-corner_width,bottom:rect.top+stroke},
+        RECT{left:rect.left+corner_width,top:rect.bottom-stroke,right:rect.right-corner_width,bottom:rect.bottom},
+        RECT{left:rect.left,top:rect.top+corner_height,right:rect.left+stroke,bottom:rect.bottom-corner_height},
+        RECT{left:rect.right-stroke,top:rect.top+corner_height,right:rect.right,bottom:rect.bottom-corner_height},
+    ];
+    let brush=CreateSolidBrush(color);
+    for area in areas{if area.right>area.left&&area.bottom>area.top{FillRect(dc,&area,brush);}}
+    DeleteObject(brush);
+}
+
+/// Copy only corner backgrounds for the focus ring; the center (and text)
+/// stays untouched. Straight border segments are drawn at native resolution.
 pub unsafe fn outline(dc:HDC,rect:RECT,color:u32,radius:i32,stroke:i32){
-    use windows_sys::Win32::Graphics::Gdi::{COLORONCOLOR,GetStockObject,NULL_BRUSH};
     let width=rect.right-rect.left;let height=rect.bottom-rect.top;
-    if width<=0||height<=0{return;}
+    if width<=0||height<=0||RectVisible(dc,&rect)==0{return;}
+    let stroke=stroke.max(1);
+    let (corner_width,corner_height)=corner_size(rect,radius,stroke);
+    corners(dc,rect,radius.max(1),stroke,None,Some(color));
+    straight_edges(dc,rect,color,stroke,corner_width,corner_height);
+}
+
+fn corner_size(rect:RECT,radius:i32,stroke:i32)->(i32,i32){
+    let extent=radius.max(1)+stroke+2;
+    (extent.min((rect.right-rect.left+1)/2),extent.min((rect.bottom-rect.top+1)/2))
+}
+
+unsafe fn corners(dc:HDC,rect:RECT,radius:i32,stroke:i32,fill:Option<(u32,u32)>,border:Option<u32>){
     const SCALE:i32=16;
-    let memory=CreateCompatibleDC(dc);
-    if memory.is_null(){return;}
-    let bitmap=CreateCompatibleBitmap(dc,width*SCALE,height*SCALE);
+    let width=rect.right-rect.left;let height=rect.bottom-rect.top;
+    let (tile_width,tile_height)=corner_size(rect,radius,stroke);
+    let tiles=[
+        RECT{left:rect.left,top:rect.top,right:rect.left+tile_width,bottom:rect.top+tile_height},
+        RECT{left:rect.right-tile_width,top:rect.top,right:rect.right,bottom:rect.top+tile_height},
+        RECT{left:rect.left,top:rect.bottom-tile_height,right:rect.left+tile_width,bottom:rect.bottom},
+        RECT{left:rect.right-tile_width,top:rect.bottom-tile_height,right:rect.right,bottom:rect.bottom},
+    ];
+    if !tiles.iter().any(|tile|RectVisible(dc,tile)!=0){return;}
+    let memory=CreateCompatibleDC(dc);if memory.is_null(){return;}
+    let bitmap=CreateCompatibleBitmap(dc,tile_width*SCALE,tile_height*SCALE);
     if bitmap.is_null(){DeleteDC(memory);return;}
-    let old_bitmap=SelectObject(memory,bitmap);
-    SetStretchBltMode(memory,COLORONCOLOR);
-    StretchBlt(memory,0,0,width*SCALE,height*SCALE,dc,rect.left,rect.top,width,height,SRCCOPY);
-    let pen=CreatePen(PS_SOLID,stroke.max(1)*SCALE,color);
-    let old_pen=SelectObject(memory,pen);let old_brush=SelectObject(memory,GetStockObject(NULL_BRUSH));
-    let corner=radius.max(1)*2*SCALE;
-    let inset=stroke.max(1)*SCALE/2;
-    RoundRect(memory,inset,inset,width*SCALE-inset,height*SCALE-inset,corner,corner);
-    SelectObject(memory,old_brush);SelectObject(memory,old_pen);DeleteObject(pen);
+    let previous=SelectObject(memory,bitmap);
+    let pen=CreatePen(PS_SOLID,if border.is_some(){stroke*SCALE}else{1},border.unwrap_or_else(||fill.unwrap().0));
+    let brush=fill.map(|(color,_)|CreateSolidBrush(color));
+    let old_pen=SelectObject(memory,pen);
+    let old_brush=SelectObject(memory,brush.unwrap_or_else(||GetStockObject(NULL_BRUSH)as HBRUSH));
+    let base=fill.map(|(_,background)|CreateSolidBrush(background));
+    let surface=RECT{left:0,top:0,right:tile_width*SCALE,bottom:tile_height*SCALE};
     let old_mode=SetStretchBltMode(dc,HALFTONE);
-    StretchBlt(dc,rect.left,rect.top,width,height,memory,0,0,width*SCALE,height*SCALE,SRCCOPY);
+    SetStretchBltMode(memory,COLORONCOLOR);
+    let inset=if border.is_some(){stroke*SCALE/2}else{1};
+    for tile in tiles{
+        if RectVisible(dc,&tile)==0{continue;}
+        if let Some(base)=base{FillRect(memory,&surface,base);}else{
+            StretchBlt(memory,0,0,surface.right,surface.bottom,dc,tile.left,tile.top,tile_width,tile_height,SRCCOPY);
+        }
+        let x=(tile.left-rect.left)*SCALE;let y=(tile.top-rect.top)*SCALE;
+        RoundRect(memory,inset-x,inset-y,width*SCALE-inset-x,height*SCALE-inset-y,radius*2*SCALE,radius*2*SCALE);
+        StretchBlt(dc,tile.left,tile.top,tile_width,tile_height,memory,0,0,surface.right,surface.bottom,SRCCOPY);
+    }
     SetStretchBltMode(dc,old_mode);
-    SelectObject(memory,old_bitmap);DeleteObject(bitmap);DeleteDC(memory);
+    SelectObject(memory,old_brush);SelectObject(memory,old_pen);
+    DeleteObject(pen);if let Some(brush)=brush{DeleteObject(brush);}if let Some(base)=base{DeleteObject(base);}
+    SelectObject(memory,previous);DeleteObject(bitmap);DeleteDC(memory);
 }
