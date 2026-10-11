@@ -1,13 +1,20 @@
 //! Raw Input evidence bound to an identified physical device in the PnP tree.
-use std::{cell::RefCell, collections::{HashMap, VecDeque}, sync::{Mutex,OnceLock,mpsc::{self,SyncSender},atomic::{AtomicUsize,Ordering}}, time::{Duration,Instant}};
+use std::{collections::{HashMap, VecDeque}, sync::{Mutex,OnceLock,mpsc::{self,SyncSender},atomic::{AtomicUsize,Ordering}}, time::{Duration,Instant}};
 use windows_sys::Win32::{Foundation::*, Devices::DeviceAndDriverInstallation::*, UI::{Input::*,WindowsAndMessaging::*}};
 
-#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+#[derive(Clone,Copy,PartialEq,Eq)]
 pub enum Event{Move,Down,Up,Wheel(i16),HorizontalWheel(i16),Button(u8,bool),Key(u32,u32),KeyUp(u32,u32),Text(u32)}
 struct Evidence{event:Event,time:u32,allowed:Option<bool>,device:usize,generation:usize,observed:Instant}
-thread_local!{
-    static EVENTS:RefCell<VecDeque<Evidence>>=RefCell::new(VecDeque::new());
-    static MOVEMENT:RefCell<Option<Evidence>>=const { RefCell::new(None) };
+// Expiry is independent of UI message traffic, including when the UI is idle.
+const EVIDENCE_TTL:Duration=Duration::from_millis(1500);
+static EVENTS:Mutex<VecDeque<Evidence>>=Mutex::new(VecDeque::new());
+static MOVEMENT:Mutex<Option<Evidence>>=Mutex::new(None);
+fn with_events<T>(f:impl FnOnce(&mut VecDeque<Evidence>)->T)->T{f(&mut EVENTS.lock().unwrap_or_else(|e|e.into_inner()))}
+fn with_movement<T>(f:impl FnOnce(&mut Option<Evidence>)->T)->T{f(&mut MOVEMENT.lock().unwrap_or_else(|e|e.into_inner()))}
+pub fn clear_evidence(){with_events(|events|events.clear());with_movement(|movement|*movement=None);}
+fn expire_evidence(){
+    with_events(|events|events.retain(|entry|entry.observed.elapsed()<EVIDENCE_TTL));
+    with_movement(|movement|{if movement.as_ref().is_some_and(|entry|entry.observed.elapsed()>=EVIDENCE_TTL){*movement=None;}});
 }
 struct Device{generation:usize,allowed:Option<bool>}
 static DEVICES:OnceLock<Mutex<HashMap<usize,Device>>>=OnceLock::new();
@@ -16,6 +23,13 @@ static GENERATION:AtomicUsize=AtomicUsize::new(1);
 pub const READY_MESSAGE:u32=WM_APP+0x71;
 fn devices()->&'static Mutex<HashMap<usize,Device>>{DEVICES.get_or_init(||Mutex::new(HashMap::new()))}
 pub fn start(){
+    if crate::input_guard::source_available(){return;}
+    static EXPIRY:OnceLock<bool>=OnceLock::new();
+    let active=*EXPIRY.get_or_init(||std::thread::Builder::new().name("input-expiry".into()).spawn(||loop{
+        expire_evidence();crate::input_guard::expire_pending();
+        std::thread::sleep(Duration::from_millis(25));
+    }).is_ok());
+    if !active{crate::audit::record("input_device","输入缓存清理线程启动失败，已停止接收设备输入");return;}
     WORKER.get_or_init(||{
         let(sender,receiver)=mpsc::sync_channel::<(usize,usize)>(257);
         match std::thread::Builder::new().name("input-device-cache".into()).spawn(move||{
@@ -37,7 +51,7 @@ pub fn start(){
                 let applied={let mut cache=devices().lock().unwrap_or_else(|e|e.into_inner());
                     if let Some(device)=cache.get_mut(&key).filter(|device|device.generation==generation){device.allowed=Some(allowed);true}else{false}};
                 if applied{
-                    crate::audit::record("input_device",&match result{Ok(id)=>format!("已识别硬件输入设备：handle={key:#x}，{id}"),Err(reason)=>format!("拒绝输入设备：handle={key:#x}，{reason}")});
+                    crate::audit::record("input_device",if allowed{"已识别硬件输入设备"}else{"拒绝虚拟或无效输入设备"});
                     unsafe{let hwnd=target();if !hwnd.is_null(){PostMessageW(hwnd,READY_MESSAGE,0,0);}}
                 }
             }
@@ -66,14 +80,15 @@ fn verdict(entry:&Evidence)->Option<bool>{
 static TARGET:AtomicUsize=AtomicUsize::new(0);
 pub fn target()->HWND{TARGET.load(Ordering::Acquire)as HWND}
 pub unsafe fn register(hwnd:HWND){
+    if crate::input_guard::source_available(){TARGET.store(hwnd as usize,Ordering::Release);clear_evidence();return;}
     start();
     let hwnd=if !hwnd.is_null()&&IsWindow(hwnd)!=0{hwnd}else{std::ptr::null_mut()};
     let flags=if hwnd.is_null(){RIDEV_REMOVE}else{RIDEV_DEVNOTIFY};
     let devices=[RAWINPUTDEVICE{usUsagePage:1,usUsage:2,dwFlags:flags,hwndTarget:hwnd},RAWINPUTDEVICE{usUsagePage:1,usUsage:6,dwFlags:flags,hwndTarget:hwnd}];
     if RegisterRawInputDevices(devices.as_ptr(),2,std::mem::size_of::<RAWINPUTDEVICE>()as u32)!=0{
         TARGET.store(hwnd as usize,Ordering::Release);
-        EVENTS.with(|events|events.borrow_mut().clear());
-        MOVEMENT.with(|movement|movement.replace(None));
+        with_events(|events|events.clear());
+        with_movement(|movement|movement.take());
     }else{crate::audit::record("input_device",&format!("注册设备输入失败：{}",std::io::Error::last_os_error()));}
 }
 unsafe fn property(node:u32,property:u32)->String{
@@ -98,7 +113,7 @@ unsafe fn identify(handle:HANDLE)->Result<String,String>{
     if GetRawInputDeviceInfoW(handle,RIDI_DEVICENAME,buffer.as_mut_ptr().cast(),&mut length)==u32::MAX{return Err("设备 ID 查询失败".into());}
     let path=String::from_utf16_lossy(&buffer[..buffer.iter().position(|value|*value==0).unwrap_or(buffer.len())]);
     // win32k 为键盘/鼠标类驱动注册的内核 RID 通道，设备名不含 PnP 实例分隔符。
-    // 实体键盘鼠标走这条通道；SendInput 注入仍由低级钩子的 INJECTED 标志拦截。
+    // 旧系统使用此通道的真实 hDevice，与窗口输入消息逐条匹配。
     let normalized=path.to_ascii_uppercase();
     if normalized.starts_with("\\\\?\\MICROSOFT KEYBOARD RID\\")||normalized.starts_with("\\\\?\\MICROSOFT MOUSE RID\\"){
         return Ok(format!("Windows 输入类驱动 RID 通道：{path}"));
@@ -129,23 +144,24 @@ unsafe fn identify(handle:HANDLE)->Result<String,String>{
 }
 fn remember(event:Event,time:u32,device:usize,allowed:Option<bool>,generation:usize){
     let entry=Evidence{event,time,device,allowed,generation,observed:Instant::now()};
-    if event==Event::Move{MOVEMENT.with(|movement|movement.replace(Some(entry)));return;}
-    EVENTS.with(|events|{
-        let mut events=events.borrow_mut();
-        while events.front().is_some_and(|old|entry.observed.saturating_duration_since(old.observed)>=Duration::from_secs(2)){events.pop_front();}
+    if event==Event::Move{with_movement(|movement|movement.replace(entry));return;}
+    with_events(|events|{
+        while events.front().is_some_and(|old|entry.observed.saturating_duration_since(old.observed)>=EVIDENCE_TTL){events.pop_front();}
         if events.len()>=256{events.pop_front();}
         events.push_back(entry);
     });
 }
 pub unsafe fn capture(message:&MSG){
+    // Ignore other windows before reading any Raw Input payload.
+    if crate::input_guard::source_available()||message.hwnd!=target(){return;}
     if message.message==WM_INPUT_DEVICE_CHANGE{
         devices().lock().unwrap_or_else(|e|e.into_inner()).remove(&(message.lParam as usize));
         if message.wParam==GIDC_ARRIVAL as usize{request(message.lParam as usize);}
-        EVENTS.with(|events|events.borrow_mut().retain(|entry|entry.device!=message.lParam as usize));
-        MOVEMENT.with(|movement|{let mut movement=movement.borrow_mut();if movement.as_ref().is_some_and(|entry|entry.device==message.lParam as usize){*movement=None;}});
+        with_events(|events|events.retain(|entry|entry.device!=message.lParam as usize));
+        with_movement(|movement|{if movement.as_ref().is_some_and(|entry|entry.device==message.lParam as usize){*movement=None;}});
         return;
     }
-    if message.message!=WM_INPUT{return;}
+    if message.message!=WM_INPUT||GetForegroundWindow()!=message.hwnd||WORKER.get().and_then(Option::as_ref).is_none(){return;}
     let mut raw:RAWINPUT=std::mem::zeroed();let mut size=std::mem::size_of::<RAWINPUT>()as u32;
     let bytes=GetRawInputData(message.lParam as HRAWINPUT,RID_INPUT,(&mut raw as *mut RAWINPUT).cast(),&mut size,std::mem::size_of::<RAWINPUTHEADER>()as u32);
     if bytes==u32::MAX||bytes<std::mem::size_of::<RAWINPUTHEADER>()as u32{return;}
@@ -188,15 +204,14 @@ pub fn consume(event:Event,time:u32)->Option<bool>{
     // Mouse movement is coalesced by Windows. Only the cosmetic hover path
     // uses a 32ms timestamp allowance; button/key actions remain exact.
     if event==Event::Move{
-        return MOVEMENT.with(|movement|{
-            let mut movement=movement.borrow_mut();
+        return with_movement(|movement|{
             let entry=movement.as_ref().filter(|entry|entry.time.wrapping_sub(time).min(time.wrapping_sub(entry.time))<=32&&entry.observed.elapsed()<Duration::from_millis(120))?;
             let result=verdict(entry)?;movement.take();Some(result)
         });
     }
-    EVENTS.with(|events|{
-        let mut events=events.borrow_mut();let now=Instant::now();
-        while events.front().is_some_and(|entry|now.saturating_duration_since(entry.observed)>=Duration::from_secs(2)){events.pop_front();}
+    with_events(|events|{
+        let now=Instant::now();
+        while events.front().is_some_and(|entry|now.saturating_duration_since(entry.observed)>=EVIDENCE_TTL){events.pop_front();}
         let exact:Vec<usize>=events.iter().enumerate().filter(|(_,entry)|entry.event==event&&entry.time==time).map(|(index,_)|index).collect();
         let candidates:Vec<usize>=if exact.is_empty(){events.iter().enumerate().filter(|(_,entry)|same_event(entry,event)&&entry.time==time).map(|(index,_)|index).collect()}else{exact};
         if candidates.is_empty(){return None;}
@@ -208,27 +223,29 @@ pub fn consume(event:Event,time:u32)->Option<bool>{
     })
 }
 
-pub fn recent_evidence()->String{
-    EVENTS.with(|events|{
-        let events=events.borrow();
-        events.iter().rev().take(6).map(|entry|format!("事件={:?}，time={}，判定={:?}",entry.event,entry.time,verdict(entry))).collect::<Vec<_>>().join("；")
-    })
-}
-
 #[cfg(test)] mod tests{
     use super::*;
+    static TEST_INPUTS:Mutex<()>=Mutex::new(());
+    #[test] fn privacy_idle_device_records_expire(){
+        let _guard=TEST_INPUTS.lock().unwrap();clear_evidence();
+        with_events(|events|events.push_back(Evidence{event:Event::Key(65,30),time:10,allowed:Some(true),device:1,generation:0,observed:Instant::now()-Duration::from_millis(1501)}));
+        expire_evidence();assert!(with_events(|events|events.is_empty()));
+    }
     #[test] fn rapid_clicks_with_same_timestamp_keep_separate_evidence(){
+        let _guard=TEST_INPUTS.lock().unwrap();clear_evidence();
         remember(Event::Down,10,1,Some(true),0);remember(Event::Down,10,1,Some(true),0);
         assert_eq!(consume(Event::Down,10),Some(true));
         assert_eq!(consume(Event::Down,10),Some(true));
         assert_eq!(consume(Event::Down,10),None);
     }
     #[test] fn forbidden_device_cannot_borrow_a_trusted_devices_timestamp(){
+        let _guard=TEST_INPUTS.lock().unwrap();clear_evidence();
         remember(Event::Down,10,1,Some(true),0);remember(Event::Down,10,2,Some(false),0);
         assert_eq!(consume(Event::Down,10),Some(false));
         assert_eq!(consume(Event::Down,10),None);
     }
     #[test] fn pending_device_keeps_evidence_until_background_result_arrives(){
+        let _guard=TEST_INPUTS.lock().unwrap();clear_evidence();
         let key=0x10101;let generation=GENERATION.fetch_add(1,Ordering::Relaxed);
         devices().lock().unwrap().insert(key,Device{generation,allowed:None});
         remember(Event::Down,20,key,None,generation);
@@ -239,6 +256,7 @@ pub fn recent_evidence()->String{
         devices().lock().unwrap().remove(&key);
     }
     #[test] fn replaced_handle_cannot_reuse_old_device_evidence(){
+        let _guard=TEST_INPUTS.lock().unwrap();clear_evidence();
         let key=0x10102;let generation=GENERATION.fetch_add(2,Ordering::Relaxed);
         devices().lock().unwrap().insert(key,Device{generation,allowed:Some(true)});
         remember(Event::Down,30,key,Some(true),generation);

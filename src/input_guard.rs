@@ -1,24 +1,18 @@
-//! One-use physical input proofs and owned command dispatch for all controls.
+//! Window-local input origin checks and one-use legacy device evidence.
 use std::{cell::{Cell,RefCell}, collections::{VecDeque,HashSet}, sync::{Mutex, OnceLock, atomic::{AtomicUsize, Ordering}}, time::{Duration, Instant}};
 use windows_sys::Win32::{Foundation::*, System::LibraryLoader::{GetModuleHandleW, GetProcAddress}, UI::{WindowsAndMessaging::*,Input::KeyboardAndMouse::{GetCapture,IsWindowEnabled}}};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Input { Mouse(i32, i32), MouseUp(i32, i32), Wheel(i32, i32, i16), Move(i32,i32), OtherButton(u8,bool,i32,i32), HorizontalWheel(i32,i32,i16), Key(u32, u32), KeyUp(u32,u32), Text(u32) }
-struct Proof { input: Input, time: u32, observed: Instant, injected: bool }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Input { Mouse(i32,i32), MouseUp(i32,i32), Wheel(i32,i32,i16), Move(i32,i32), OtherButton(u8,bool,i32,i32), HorizontalWheel(i32,i32,i16), Key(u32,u32), KeyUp(u32,u32), Text(u32) }
 thread_local! {
-    static MOVE_PROOF: RefCell<Option<Proof>> = const { RefCell::new(None) };
     static PROMPTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
-    static PENDING: RefCell<VecDeque<Pending>> = RefCell::new(VecDeque::new());
-    static HOVER_PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
     static WAIT_TIMER: Cell<usize> = const { Cell::new(0) };
     static VALIDATED: RefCell<Option<(usize,u32,usize,isize,bool,bool)>> = const { RefCell::new(None) };
-    static PROOFS: RefCell<VecDeque<Proof>> = RefCell::new(VecDeque::new());
-    static HOOKS: RefCell<(HHOOK,HHOOK)> = const { RefCell::new((std::ptr::null_mut(),std::ptr::null_mut())) };
     static COMMAND: RefCell<Option<(usize,usize)>> = const { RefCell::new(None) };
     static SYSTEM_COMMAND: RefCell<Option<(usize,usize)>> = const { RefCell::new(None) };
     static DISPATCH: RefCell<Option<(usize,u32,usize,isize,u32)>> = const { RefCell::new(None) };
     static REJECTED_AUTOMATION: Cell<bool> = const { Cell::new(false) };
-    static LAST_REJECTION: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    static LAST_REJECTION: Cell<Option<Instant>> = const { Cell::new(None) };
     static LAST_TIMEOUT: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 static MODE:AtomicUsize=AtomicUsize::new(usize::MAX);
@@ -45,41 +39,6 @@ pub fn finish_auto_prompt(disable:bool){
     let hwnd=MAIN_WINDOW.load(Ordering::Acquire)as HWND;
     if !hwnd.is_null(){unsafe{apply_protection_state(hwnd);}}
 }
-fn observe(input:Input,time:u32,injected:bool){
-    let proof=Proof{input,time,observed:Instant::now(),injected};
-    if matches!(input,Input::Move(..)){MOVE_PROOF.with(|movement|movement.replace(Some(proof)));return;}
-    PROOFS.with(|proofs|{
-        let mut proofs=proofs.borrow_mut();
-        if proofs.len()==256{proofs.pop_front();}
-        proofs.push_back(proof);
-    });
-}
-// 精确虚拟键优先；输入法改写虚拟键时回退到扫描码。
-fn same_input(recorded:Input,requested:Input)->bool{
-    if recorded==requested{return true;}
-    match(requested,recorded){
-        (Input::Key(_,scan),Input::Key(_,other))|(Input::KeyUp(_,scan),Input::KeyUp(_,other))=>scan==other,
-        (Input::Text(_),Input::Text(_))=>true,
-        _=>false,
-    }
-}
-fn consume(input:Input,time:u32)->Option<bool>{
-    if matches!(input,Input::Move(..)){
-        return MOVE_PROOF.with(|movement|{
-            let mut movement=movement.borrow_mut();
-            let proof=movement.as_ref().filter(|proof|proof.input==input&&proof.time==time)?;
-            if proof.observed.elapsed()>=Duration::from_secs(2){movement.take();return None;}
-            Some(!movement.take().unwrap().injected)
-        });
-    }
-    PROOFS.with(|proofs|{
-        let mut proofs=proofs.borrow_mut();
-        let index=proofs.iter().position(|proof|proof.input==input&&proof.time==time)
-            .or_else(||proofs.iter().position(|proof|same_input(proof.input,input)&&proof.time==time))?;
-        let proof=proofs.remove(index).unwrap();
-        (proof.observed.elapsed()<Duration::from_secs(2)).then_some(!proof.injected)
-    })
-}
 fn mouse_input(msg:u32,button:u16,point:POINT)->Option<Input>{
     Some(match msg{
         WM_MOUSEMOVE|WM_NCMOUSEMOVE=>Input::Move(point.x,point.y),
@@ -96,106 +55,68 @@ fn mouse_input(msg:u32,button:u16,point:POINT)->Option<Input>{
         _=>return None,
     })
 }
-fn recent_proofs()->String{
-    PROOFS.with(|proofs|{
-        let proofs=proofs.borrow();
-        proofs.iter().rev().take(6).map(|proof|format!("输入={:?}，time={}，注入={}",proof.input,proof.time,proof.injected)).collect::<Vec<_>>().join("；")
-    })
-}
-fn log_timeout(pending:&Pending,kind:&str){
+fn log_timeout(kind:&str){
     let report=LAST_TIMEOUT.with(|last|if last.get().is_none_or(|time|time.elapsed()>=Duration::from_secs(2)){last.set(Some(Instant::now()));true}else{false});
-    if !report{return;}
-    let raw=crate::input_devices::recent_evidence();
-    crate::audit::record("input_validation",&format!("{kind}超时未匹配：hwnd={:#x}，消息={:#x}，输入={:?}，钩子凭据={:?}，硬件设备凭据={:?}，消息时间={}，来源={:?}，最近钩子记录=[{}]，最近设备记录=[{}]",pending.message.hwnd as usize,pending.message.message,pending.input,pending.proof,pending.device,pending.message.time,pending.source.as_ref().map(|source|(source.device,source.origin)),recent_proofs(),raw));
+    if report{crate::audit::record("input_validation",&format!("{kind}超时，操作已拦截"));}
 }
-unsafe extern "system" fn mouse_hook(code:i32,w:WPARAM,l:LPARAM)->LRESULT{
-    if code==HC_ACTION as i32&&(w as u32!=WM_MOUSEMOVE||GetForegroundWindow()==crate::input_devices::target()){
-        let event=&*(l as *const MSLLHOOKSTRUCT);
-        if let Some(input)=mouse_input(w as u32,(event.mouseData>>16)as u16,event.pt){observe(input,event.time,event.flags&(LLMHF_INJECTED|LLMHF_LOWER_IL_INJECTED)!=0);}
-    }
-    CallNextHookEx(std::ptr::null_mut(),code,w,l)
-}
-// Low-level hooks report left/right modifier VKs; queued key messages use
-// generic VK_SHIFT / VK_CONTROL / VK_MENU. Keep the scan code for matching.
 fn key_input(vk:u32,scan:u32)->Input{
     let vk=match vk{0xa0|0xa1=>0x10,0xa2|0xa3=>0x11,0xa4|0xa5=>0x12,_=>vk};
     Input::Key(vk,scan&0xff)
 }
-unsafe extern "system" fn keyboard_hook(code:i32,w:WPARAM,l:LPARAM)->LRESULT{
-    if code==HC_ACTION as i32&&matches!(w as u32,WM_KEYDOWN|WM_SYSKEYDOWN|WM_KEYUP|WM_SYSKEYUP)&&GetForegroundWindow()==crate::input_devices::target(){
-        let event=&*(l as *const KBDLLHOOKSTRUCT);
-        let injected=event.flags&(LLKHF_INJECTED|LLKHF_LOWER_IL_INJECTED)!=0;
-        let input=key_input(event.vkCode,event.scanCode);
-        if matches!(w as u32,WM_KEYUP|WM_SYSKEYUP){if let Input::Key(vk,scan)=input{observe(Input::KeyUp(vk,scan),event.time,injected);}}
-        else{
-            observe(input,event.time,injected);
-            // TranslateMessage posts WM_CHAR separately from WM_KEYDOWN.
-            observe(Input::Text(event.scanCode&0xff),event.time,injected);
-        }
-    }
-    CallNextHookEx(std::ptr::null_mut(),code,w,l)
-}
-pub fn hooks_installed()->bool{HOOKS.with(|hooks|{let(mouse,keyboard)=*hooks.borrow();!mouse.is_null()&&!keyboard.is_null()})}
-pub fn hooks_present()->bool{HOOKS.with(|hooks|{let(mouse,keyboard)=*hooks.borrow();!mouse.is_null()||!keyboard.is_null()})}
-pub unsafe fn install()->bool{
-    if hooks_installed(){return true;}
-    uninstall();
-    let module=GetModuleHandleW(std::ptr::null());
-    let mouse=SetWindowsHookExW(WH_MOUSE_LL,Some(mouse_hook),module,0);
-    let keyboard=SetWindowsHookExW(WH_KEYBOARD_LL,Some(keyboard_hook),module,0);
-    HOOKS.with(|hooks|*hooks.borrow_mut()=(mouse,keyboard));
-    !mouse.is_null()&&!keyboard.is_null()
-}
-pub unsafe fn uninstall(){
-    HOOKS.with(|hooks|{
-        let (mouse,keyboard)=hooks.replace((std::ptr::null_mut(),std::ptr::null_mut()));
-        if !mouse.is_null(){UnhookWindowsHookEx(mouse);}
-        if !keyboard.is_null(){UnhookWindowsHookEx(keyboard);}
-    });
-    PROOFS.with(|proofs|proofs.borrow_mut().clear());
-    MOVE_PROOF.with(|movement|movement.replace(None));
-    clear_pending();
-}
-/// 按当前设置安装或卸载输入钩子与 Raw Input 注册。
-/// 关闭控件保护时卸载，输入不再回调到 UI 线程，悬停动画不再被串行化阻塞。
+pub unsafe fn clear_input(){clear_pending();crate::input_devices::clear_evidence();}
+/// Modern Windows needs no input listener. Raw Input is registered only when
+/// the input-source API is absent (Windows 7 and earlier).
 pub unsafe fn apply_protection_state(hwnd:HWND){
-    if protection_enabled(){
-        if !install(){crate::audit::record("protection","控件保护输入钩子安装失败");}
-        crate::input_devices::register(hwnd);
-    }else{
-        uninstall();
-        crate::input_devices::register(std::ptr::null_mut());
-    }
+    clear_input();
+    crate::input_devices::register(if protection_enabled(){hwnd}else{std::ptr::null_mut()});
 }
-// Resolve dynamically to retain Windows 7 support; newer Windows supplies an
-// additional source check. Hooks also reject injections by UIAccess programs.
 #[derive(Clone,Copy)]
 #[repr(C)]
 struct Source { device:u32, origin:u32 }
 const IMO_HARDWARE:u32=1;
 const IMO_INJECTED:u32=2;
-unsafe fn input_source()->Option<Source>{
-    type Query=unsafe extern "system" fn(*mut Source)->BOOL;
+type Query=unsafe extern "system" fn(*mut Source)->BOOL;
+fn source_query()->Option<Query>{
     static QUERY:OnceLock<Option<Query>>=OnceLock::new();
-    let query=QUERY.get_or_init(||{
+    *QUERY.get_or_init(||unsafe{
         let module=GetModuleHandleW("user32.dll\0".encode_utf16().collect::<Vec<_>>().as_ptr());
         GetProcAddress(module,b"GetCurrentInputMessageSource\0".as_ptr()).map(|function|std::mem::transmute::<unsafe extern "system" fn()->isize,Query>(function))
-    });
-    let Some(query)=query else{return None;};
+    })
+}
+pub fn source_available()->bool{source_query().is_some()}
+unsafe fn input_source()->Option<Source>{
+    let query=source_query()?;
     let mut source=Source{device:0,origin:0};
     if query(&mut source)!=0{Some(source)}else{Some(Source{device:0,origin:0})}
 }
+fn hardware_source(source:Source)->bool{source.origin==IMO_HARDWARE&&matches!(source.device,1|2|4|8|16)}
 pub fn is_control_input(msg:u32)->bool{
     matches!(msg,WM_KEYDOWN|WM_SYSKEYDOWN|WM_KEYUP|WM_SYSKEYUP|WM_CHAR)
         ||mouse_input(msg,1,POINT{x:0,y:0}).is_some()&&!matches!(msg,WM_MOUSEMOVE|WM_NCMOUSEMOVE)
 }
 const INPUT_WAIT:Duration=Duration::from_millis(120);
-struct Pending{message:MSG,input:Input,proof:Option<bool>,device:Option<bool>,source:Option<Source>,sent:bool,started:Instant,context:Option<(usize,usize,usize)>}
+// Numeric window handles allow the expiry worker to drop queued records without
+// accessing a window or invoking any UI API on that thread.
+struct StoredMessage{window:usize,msg:u32,w:usize,l:isize,time:u32,x:i32,y:i32}
+impl StoredMessage{
+    fn new(message:&MSG)->Self{Self{window:message.hwnd as usize,msg:message.message,w:message.wParam,l:message.lParam,time:message.time,x:message.pt.x,y:message.pt.y}}
+    fn message(&self)->MSG{MSG{hwnd:self.window as HWND,message:self.msg,wParam:self.w,lParam:self.l,time:self.time,pt:POINT{x:self.x,y:self.y},..unsafe{std::mem::zeroed()}}}
+}
+struct Pending{message:StoredMessage,input:Input,device:Option<bool>,sent:bool,started:Instant,context:Option<(usize,usize,usize)>}
+#[derive(Default)]
+struct PendingInputs{queue:VecDeque<Pending>,hover:Option<Pending>}
+fn pending()->&'static Mutex<PendingInputs>{static PENDING:OnceLock<Mutex<PendingInputs>>=OnceLock::new();PENDING.get_or_init(||Mutex::new(PendingInputs::default()))}
+pub fn expire_pending(){
+    let mut inputs=pending().lock().unwrap_or_else(|e|e.into_inner());
+    inputs.queue.retain(|input|input.started.elapsed()<Duration::from_millis(1500));
+    if inputs.hover.as_ref().is_some_and(|input|input.started.elapsed()>=Duration::from_millis(1500)){inputs.hover=None;}
+}
 pub fn set_prompt_protected(hwnd:HWND,enabled:bool){
     PROMPTS.with(|prompts|{let mut prompts=prompts.borrow_mut();if enabled{prompts.insert(hwnd as usize);}else{prompts.remove(&(hwnd as usize));}});
     if !enabled{
-        PENDING.with(|queue|queue.borrow_mut().retain(|pending|pending.message.hwnd!=hwnd));
-        HOVER_PENDING.with(|slot|{let mut slot=slot.borrow_mut();if slot.as_ref().is_some_and(|pending|pending.message.hwnd==hwnd){*slot=None;}});
+        let mut inputs=pending().lock().unwrap_or_else(|e|e.into_inner());
+        inputs.queue.retain(|input|input.message.window!=hwnd as usize);
+        if inputs.hover.as_ref().is_some_and(|input|input.message.window==hwnd as usize){inputs.hover=None;}
     }
 }
 fn page_context(hwnd:HWND)->Option<(usize,usize,usize)>{
@@ -222,6 +143,7 @@ unsafe fn message_input(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->Option<Input>{
     }
 }
 unsafe fn deliver(message:&MSG,validation:Option<(bool,bool)>)->LRESULT{
+    if source_available(){TranslateMessage(message);return DispatchMessageW(message);}
     let previous=VALIDATED.with(|current|current.replace(validation.map(|(accepted,suspicious)|(message.hwnd as usize,message.message,message.wParam,message.lParam,accepted,suspicious))));
     let result=DISPATCH.with(|dispatch|{
         let previous=dispatch.replace(Some((message.hwnd as usize,message.message,message.wParam,message.lParam,message.time)));
@@ -230,135 +152,115 @@ unsafe fn deliver(message:&MSG,validation:Option<(bool,bool)>)->LRESULT{
     });
     VALIDATED.with(|current|current.replace(previous));result
 }
-fn suspicious(pending:&Pending)->bool{
-    pending.proof==Some(false)||pending.device==Some(false)||pending.sent
-        ||pending.source.as_ref().is_some_and(|source|source.origin==IMO_INJECTED)
-}
-unsafe fn resolve(pending:&mut Pending)->Option<(bool,bool)>{
-    if page_context(pending.message.hwnd)!=pending.context{return Some((false,false));}
-    if pending.proof.is_none(){pending.proof=consume(pending.input,pending.message.time);}
-    if pending.device.is_none(){pending.device=crate::input_devices::consume(raw_event(pending.input),pending.message.time);}
-    if suspicious(pending){return Some((false,true));}
-    // 低级钩子会被系统在响应超时后静默摘除，此时以 IMO_HARDWARE 来源作为等价硬件证据。
-    let hardware_source=pending.source.as_ref().is_some_and(|source|source.origin==IMO_HARDWARE);
-    if pending.device==Some(true)&&(pending.proof==Some(true)||hardware_source){
-        let valid=GetForegroundWindow()==pending.message.hwnd&&IsWindowEnabled(pending.message.hwnd)!=0
-            &&message_input(pending.message.hwnd,pending.message.message,pending.message.wParam,pending.message.lParam)==Some(pending.input);
-        return Some((valid,false));
+unsafe fn resolve(input:&mut Pending)->Option<(bool,bool)>{
+    let message=input.message.message();
+    if page_context(message.hwnd)!=input.context{return Some((false,false));}
+    if input.device.is_none(){input.device=crate::input_devices::consume(raw_event(input.input),message.time);}
+    if input.device==Some(false)||input.sent{return Some((false,true));}
+    if input.device==Some(true){
+        return Some((GetForegroundWindow()==message.hwnd&&IsWindowEnabled(message.hwnd)!=0
+            &&message_input(message.hwnd,message.message,message.wParam,message.lParam)==Some(input.input),false));
     }
     None
 }
 unsafe fn cancel(message:&MSG){if IsWindow(message.hwnd)!=0&&GetCapture()==message.hwnd{SendMessageW(message.hwnd,WM_CANCELMODE,0,0);}}
 unsafe extern "system" fn wait_tick(_hwnd:HWND,_msg:u32,_id:usize,_time:u32){flush_pending();}
 unsafe fn update_wait_timer(){
-    let waiting=PENDING.with(|pending|!pending.borrow().is_empty())||HOVER_PENDING.with(|pending|pending.borrow().is_some());
+    let waiting={let inputs=pending().lock().unwrap_or_else(|e|e.into_inner());!inputs.queue.is_empty()||inputs.hover.is_some()};
     let failed=WAIT_TIMER.with(|timer|{
         if waiting&&timer.get()==0{timer.set(SetTimer(std::ptr::null_mut(),0,10,Some(wait_tick)));}
         else if !waiting&&timer.get()!=0{KillTimer(std::ptr::null_mut(),timer.replace(0));}
         waiting&&timer.get()==0
     });
-    if failed{
-        let messages=PENDING.with(|queue|queue.borrow_mut().drain(..).map(|pending|pending.message).collect::<Vec<_>>());
-        HOVER_PENDING.with(|slot|slot.replace(None));for message in messages{cancel(&message);}
-    }
+    if failed{clear_pending();}
 }
 fn clear_pending(){
-    PENDING.with(|pending|pending.borrow_mut().clear());HOVER_PENDING.with(|pending|pending.replace(None));
+    *pending().lock().unwrap_or_else(|e|e.into_inner())=PendingInputs::default();
     WAIT_TIMER.with(|timer|{let id=timer.replace(0);if id!=0{unsafe{KillTimer(std::ptr::null_mut(),id);}}});
     unsafe{
         let captured=GetCapture();
-        if !captured.is_null()&&(captured as usize==MAIN_WINDOW.load(Ordering::Acquire)||PROMPTS.with(|prompts|prompts.borrow().contains(&(captured as usize)))){
-            SendMessageW(captured,WM_CANCELMODE,0,0);
-        }
+        if !captured.is_null()&&guarded(captured){SendMessageW(captured,WM_CANCELMODE,0,0);}
     }
 }
 unsafe fn flush_pending(){
-    // Never hold a RefCell borrow across dispatch: an action can open a modal
-    // prompt whose nested message loop must continue processing its own input.
+    // Release the queue lock before dispatch: a control may open a modal prompt.
     for _ in 0..128{
-        let Some(mut pending)=PENDING.with(|queue|queue.borrow_mut().pop_front())else{break;};
-        if IsWindow(pending.message.hwnd)==0||IsWindowEnabled(pending.message.hwnd)==0{cancel(&pending.message);continue;}
-        if pending.started.elapsed()>=INPUT_WAIT{
-            log_timeout(&pending,"输入凭据");
-            cancel(&pending.message);continue;
-        }
-        if let Some(result)=resolve(&mut pending){deliver(&pending.message,Some(result));}
-        else{PENDING.with(|queue|queue.borrow_mut().push_front(pending));break;}
+        let Some(mut input)=pending().lock().unwrap_or_else(|e|e.into_inner()).queue.pop_front()else{break;};
+        let message=input.message.message();
+        if IsWindow(message.hwnd)==0||IsWindowEnabled(message.hwnd)==0{cancel(&message);continue;}
+        if input.started.elapsed()>=INPUT_WAIT{log_timeout("设备凭据");cancel(&message);continue;}
+        if let Some(result)=resolve(&mut input){drop(input);deliver(&message,Some(result));}
+        else{pending().lock().unwrap_or_else(|e|e.into_inner()).queue.push_front(input);break;}
     }
-    if let Some(mut pending)=HOVER_PENDING.with(|slot|slot.replace(None)){
-        if IsWindow(pending.message.hwnd)!=0&&IsWindowEnabled(pending.message.hwnd)!=0{
-            if let Some(result)=resolve(&mut pending){deliver(&pending.message,Some(result));}
-            else if pending.started.elapsed()<INPUT_WAIT{HOVER_PENDING.with(|slot|{if slot.borrow().is_none(){slot.replace(Some(pending));}});}
-            else{log_timeout(&pending,"悬停凭据");cancel(&pending.message);}
+    let hover=pending().lock().unwrap_or_else(|e|e.into_inner()).hover.take();
+    if let Some(mut input)=hover{
+        let message=input.message.message();
+        if IsWindow(message.hwnd)!=0&&IsWindowEnabled(message.hwnd)!=0{
+            if let Some(result)=resolve(&mut input){drop(input);deliver(&message,Some(result));}
+            else if input.started.elapsed()<INPUT_WAIT{
+                let mut inputs=pending().lock().unwrap_or_else(|e|e.into_inner());if inputs.hover.is_none(){inputs.hover=Some(input);}
+            }else{log_timeout("悬停凭据");cancel(&message);}
         }
     }
     update_wait_timer();
 }
-/// Snapshot the original origin before reading other queued Raw Input records.
-/// Preserve action order while waiting asynchronously for device identification.
 pub unsafe fn dispatch_message(message:&MSG)->LRESULT{
+    // Query the modern API inside the window procedure, while this message is
+    // being dispatched; no Raw Input/key history is collected on this path.
+    if source_available(){return deliver(message,None);}
     if message.message==crate::input_devices::READY_MESSAGE{flush_pending();return 0;}
     if matches!(message.message,WM_INPUT|WM_INPUT_DEVICE_CHANGE){
         if message.message==WM_INPUT_DEVICE_CHANGE{clear_pending();}
         crate::input_devices::capture(message);
         let result=deliver(message,None);flush_pending();return result;
     }
-    // 颜色与焦点反馈同样先取得输入凭据；未通过时不产生任何视觉变化。
     if !guarded(message.hwnd){return deliver(message,None);}
     let Some(input)=message_input(message.hwnd,message.message,message.wParam,message.lParam)else{return deliver(message,None);};
-    let mut pending=Pending{message:*message,input,proof:consume(input,message.time),device:None,source:input_source(),sent:InSendMessageEx(std::ptr::null())!=0,started:Instant::now(),context:page_context(message.hwnd)};
+    if message.hwnd!=crate::input_devices::target()||GetForegroundWindow()!=message.hwnd{return deliver(message,Some((false,false)));}
+    let mut input=Pending{message:StoredMessage::new(message),input,device:None,sent:InSendMessageEx(std::ptr::null())!=0,started:Instant::now(),context:page_context(message.hwnd)};
     let mut raw:MSG=std::mem::zeroed();
     for _ in 0..256{
         if PeekMessageW(&mut raw,std::ptr::null_mut(),WM_INPUT_DEVICE_CHANGE,WM_INPUT,PM_REMOVE)==0{break;}
         if raw.message==WM_INPUT_DEVICE_CHANGE{clear_pending();}
         crate::input_devices::capture(&raw);DefWindowProcW(raw.hwnd,raw.message,raw.wParam,raw.lParam);
     }
-    let decision=resolve(&mut pending);
-    if let Some(result)=decision{return deliver(message,Some(result));}
-    if matches!(message.message,WM_MOUSEMOVE|WM_NCMOUSEMOVE){
-        HOVER_PENDING.with(|slot|slot.replace(Some(pending)));
-    }else if PENDING.with(|queue|queue.borrow().len())>=128{
-        cancel(message);return 0;
-    }else{
-        PENDING.with(|queue|queue.borrow_mut().push_back(pending));
+    if let Some(result)=resolve(&mut input){drop(input);return deliver(message,Some(result));}
+    {
+        let mut inputs=pending().lock().unwrap_or_else(|e|e.into_inner());
+        if matches!(message.message,WM_MOUSEMOVE|WM_NCMOUSEMOVE){inputs.hover=Some(input);}
+        else if inputs.queue.len()>=128{drop(inputs);cancel(message);return 0;}
+        else{inputs.queue.push_back(input);}
     }
     flush_pending();0
 }
-pub unsafe fn physical_gesture(_hwnd:HWND,_handle:windows_sys::Win32::UI::Input::Touch::HGESTUREINFO)->bool{
-    // Gesture handles contain no device ID to bind to verified Raw Input.
-    false
+pub unsafe fn physical_gesture(hwnd:HWND,_handle:windows_sys::Win32::UI::Input::Touch::HGESTUREINFO)->bool{
+    input_source().is_some_and(hardware_source)&&GetForegroundWindow()==hwnd&&IsWindowEnabled(hwnd)!=0&&InSendMessageEx(std::ptr::null())==0
 }
 pub fn rejected_automation()->bool{REJECTED_AUTOMATION.with(Cell::get)}
 pub unsafe fn physical_message(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->bool{
     REJECTED_AUTOMATION.with(|value|value.set(false));
-    // 未受保护的窗口不再逐条校验凭据，避免无谓的全局设备锁与凭据消费。
     if !guarded(hwnd){return true;}
-    if let Some((accepted,suspicious))=VALIDATED.with(|current|current.borrow().as_ref().filter(|(window,message,key,data,_,_)|*window==hwnd as usize&&*message==msg&&*key==w&&*data==l&&InSendMessageEx(std::ptr::null())==0).map(|(_,_,_,_,accepted,suspicious)|(*accepted,*suspicious))){
+    if let Some((accepted,suspicious))=VALIDATED.with(|current|{
+        let mut current=current.borrow_mut();
+        if current.as_ref().is_some_and(|(window,message,key,data,_,_)|*window==hwnd as usize&&*message==msg&&*key==w&&*data==l&&InSendMessageEx(std::ptr::null())==0){current.take().map(|(_,_,_,_,accepted,suspicious)|(accepted,suspicious))}else{None}
+    }){
+        DISPATCH.with(|dispatch|dispatch.take());
         REJECTED_AUTOMATION.with(|value|value.set(suspicious));return accepted;
     }
     let Some(input)=message_input(hwnd,msg,w,l)else{return false;};
-    let queued_time=DISPATCH.with(|dispatch|dispatch.borrow().as_ref().filter(|(window,message,key,data,_)|*window==hwnd as usize&&*message==msg&&*key==w&&*data==l).map(|(_,_,_,_,time)|*time));
-    let time=queued_time.unwrap_or_else(||GetMessageTime()as u32);
-    let proof=consume(input,time);
-    let device=crate::input_devices::consume(raw_event(input),time);
-    let source=input_source();
-    let foreground=GetForegroundWindow();
     let sent=InSendMessageEx(std::ptr::null())!=0;
-    let hardware_source=source.as_ref().is_some_and(|source|source.origin==IMO_HARDWARE);
-    let accepted=device==Some(true)&&proof!=Some(false)&&(proof==Some(true)||hardware_source)&&(queued_time.is_some()||!sent)
-        &&source.as_ref().is_none_or(|source|source.origin!=IMO_INJECTED)&&foreground==hwnd;
-    // Missing hook/Raw Input evidence can occur during activation or queue
-    // backlog. It still blocks the action, but does not identify automation.
-    let suspicious=proof==Some(false)||device==Some(false)||sent
-        ||source.as_ref().is_some_and(|source|source.origin==IMO_INJECTED)
-        ||(proof.is_none()&&device.is_none()&&source.as_ref().is_none_or(|source|source.origin!=IMO_HARDWARE));
+    let (evidence,suspicious)=if let Some(source)=input_source(){
+        (hardware_source(source),source.origin==IMO_INJECTED||!hardware_source(source)||sent)
+    }else{
+        let time=DISPATCH.with(|dispatch|dispatch.borrow().as_ref().filter(|(window,message,key,data,_)|*window==hwnd as usize&&*message==msg&&*key==w&&*data==l).map(|(_,_,_,_,time)|*time)).unwrap_or_else(||GetMessageTime()as u32);
+        let device=crate::input_devices::consume(raw_event(input),time);
+        (device==Some(true),device!=Some(true)||sent)
+    };
+    let accepted=evidence&&!sent&&GetForegroundWindow()==hwnd&&IsWindowEnabled(hwnd)!=0;
     REJECTED_AUTOMATION.with(|value|value.set(!accepted&&suspicious));
     if !accepted&&!matches!(msg,WM_MOUSEMOVE|WM_NCMOUSEMOVE){
-        let report=LAST_REJECTION.with(|last|{
-            let mut last=last.borrow_mut();
-            if last.is_none_or(|time|time.elapsed()>=Duration::from_secs(2)){*last=Some(Instant::now());true}else{false}
-        });
-        if report{crate::audit::record("input_validation",&format!("输入验证未通过：hwnd={:#x}，消息={msg:#x}，钩子凭据={proof:?}，硬件设备凭据={device:?}，消息时间={time}，确认模拟或无效设备={suspicious}，队列消息={}，设备来源={:?}，前台窗口={:#x}",hwnd as usize,queued_time.is_some(),source.as_ref().map(|source|(source.device,source.origin)),foreground as usize));}
+        let report=LAST_REJECTION.with(|last|if last.get().is_none_or(|time|time.elapsed()>=Duration::from_secs(2)){last.set(Some(Instant::now()));true}else{false});
+        if report{crate::audit::record("input_validation","输入来源验证未通过，操作已拦截");}
     }
     accepted
 }
@@ -401,19 +303,15 @@ pub fn take_internal(hwnd:HWND,msg:u32,w:WPARAM,token:LPARAM)->Option<LPARAM>{
 
 #[cfg(test)] mod tests{
     use super::*;
-    #[test] fn hardware_proof_is_one_use(){
-        observe(Input::Key(13,28),10,false);
-        assert_eq!(consume(Input::Key(13,28),10),Some(true));
-        assert_eq!(consume(Input::Key(13,28),10),None);
+    #[test] fn privacy_origin_rejects_injected_and_unavailable_input(){
+        for device in [1,2,4,8,16]{assert!(hardware_source(Source{device,origin:IMO_HARDWARE}));}
+        assert!(!hardware_source(Source{device:1,origin:IMO_INJECTED}));
+        assert!(!hardware_source(Source{device:0,origin:IMO_HARDWARE}));
+        assert!(!hardware_source(Source{device:1,origin:0}));
     }
-    #[test] fn injected_input_is_rejected(){
-        observe(Input::Mouse(20,30),10,true);
-        assert_eq!(consume(Input::Mouse(20,30),10),Some(false));
-    }
-    #[test] fn forged_coordinates_and_time_are_rejected(){
-        observe(Input::Mouse(20,30),10,false);
-        assert_eq!(consume(Input::Mouse(21,30),10),None);
-        assert_eq!(consume(Input::Mouse(20,30),11),None);
-        assert_eq!(consume(Input::Mouse(20,30),10),Some(true));
+    #[test] fn privacy_pending_records_expire_without_ui_dispatch(){
+        let message=MSG{message:WM_KEYDOWN,wParam:65,..unsafe{std::mem::zeroed()}};
+        pending().lock().unwrap().queue.push_back(Pending{message:StoredMessage::new(&message),input:Input::Key(65,30),device:None,sent:false,started:Instant::now()-Duration::from_millis(1501),context:None});
+        expire_pending();assert!(pending().lock().unwrap().queue.is_empty());
     }
 }

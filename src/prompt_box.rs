@@ -244,18 +244,16 @@ unsafe fn show(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs:Vec<(i32,
     if specs.is_empty(){return 0;}
     use windows_sys::Win32::System::Com::{CoInitializeEx,CoUninitialize,COINIT_APARTMENTTHREADED};
     let com=CoInitializeEx(null_mut(),COINIT_APARTMENTTHREADED as u32);
-    // A modal window shares its owner's UI thread and therefore its input proofs.
+    // A modal window uses its owner's UI thread for input-source validation.
     // UIA events already run on the separate accessibility event thread.
     let previous_focus=windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus();
     let mut disabled=Vec::new();
     if !owner.is_null()&&IsWindowEnabled(owner)!=0{EnableWindow(owner,0);disabled.push(owner);}
     else if owner.is_null()&&flags&MB_TASKMODAL!=0{EnumThreadWindows(GetCurrentThreadId(),Some(disable_task_window),&mut disabled as *mut Vec<HWND>as isize);}
-    let had_hooks=crate::input_guard::hooks_present();
     let previous_raw_target=crate::input_devices::target();
     let names=specs.into_iter().map(|(id,label)|(id,label.to_owned())).collect();
     let result=show_on_thread(owner,text,title,flags,names);
     crate::input_devices::register(previous_raw_target);
-    if !had_hooks{crate::input_guard::uninstall();}
     for window in disabled{if IsWindow(window)!=0{EnableWindow(window,1);}}
     if !owner.is_null()&&IsWindow(owner)!=0{
         SetActiveWindow(owner);SetForegroundWindow(owner);
@@ -267,10 +265,6 @@ unsafe fn show(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs:Vec<(i32,
 
 unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs:Vec<(i32,String)>)->i32{
     if specs.is_empty()||(!owner.is_null()&&IsWindow(owner)==0){return 0;}
-    if flags&PROTECT!=0{
-        // Reuse the owner thread's hooks; do not clear outstanding real input.
-        if !crate::input_guard::install(){crate::audit::record("protection","提示框输入钩子安装失败");}
-    }
     static REGISTER:Once=Once::new();let class=wide("SilverFoxMessageBoxWindow");let instance=GetModuleHandleW(null());
     REGISTER.call_once(||{let wc=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance,lpszClassName:class.as_ptr(),hCursor:LoadCursorW(null_mut(),IDC_ARROW),hbrBackground:(COLOR_WINDOW+1)as HBRUSH,..std::mem::zeroed()};RegisterClassW(&wc);});
     let dpi=if owner.is_null(){crate::dpi::system_dpi()}else{crate::dpi::window_dpi(owner)}.max(96)as i32;let s=|n:i32|n*dpi/96;

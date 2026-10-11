@@ -104,7 +104,7 @@ const ID_DIRECTORY_CANCEL:usize=391;
 const ID_DIRECTORY_SCAN:usize=392;
 const ID_DIRECTORY_TITLE:usize=393;
 const ID_DIRECTORY_ERROR:usize=395;
-const CLIENT_VERSION:&str="2026.10.10.1";
+const CLIENT_VERSION:&str="2026.10.12.1";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
 // The only terminal page in the scan/remediation flow. It is entered by the
 // remediation worker after all selected items have been processed, never by a
@@ -967,7 +967,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             state().scan_cancel.store(true, Ordering:: Relaxed);
             state().shutdown.store(true, Ordering:: Relaxed);
             scanner::interrupt_active_scan_io();
-            input_guard::uninstall();
+            input_guard::clear_input();
             audit::record("session","关闭窗口，取消正在运行的任务");
             KillTimer(hwnd,ACCESSIBILITY_TIMER);
             KillTimer(hwnd,BUTTON_ANIMATION_TIMER);
