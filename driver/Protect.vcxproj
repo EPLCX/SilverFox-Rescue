@@ -9,7 +9,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{EA5FC92C-CE46-43C4-A365-1DB7D6BD2890}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>SilverFoxProtect</RootNamespace>
+    <RootNamespace>Protect</RootNamespace>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -22,9 +22,9 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(CARGO_TARGET_DIR)\silverfox-driver\build\</OutDir>
-    <IntDir>$(CARGO_TARGET_DIR)\silverfox-driver\obj\</IntDir>
-    <TargetName>SilverFoxProtect</TargetName>
+    <OutDir>$(CARGO_TARGET_DIR)\protect-driver\build\</OutDir>
+    <IntDir>$(CARGO_TARGET_DIR)\protect-driver\obj\</IntDir>
+    <TargetName>Protect</TargetName>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
   </PropertyGroup>
   <Target Name="ValidateCargoTarget">
@@ -46,9 +46,9 @@
     </DriverSign>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="SilverFoxProtect.c" />
-    <ClInclude Include="SilverFoxProtect.h" />
-    <Inf Include="SilverFoxProtect.inf" />
+    <ClCompile Include="Protect.c" />
+    <ClInclude Include="Protect.h" />
+    <Inf Include="Protect.inf" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

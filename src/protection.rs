@@ -91,7 +91,7 @@ pub fn enable_user_mode_protection()->String{
 }
 
 fn open_device()->Result<*mut core::ffi::c_void>{
-    let name=wide(r"\\.\SilverFoxProtect");
+    let name=wide(r"\\.\Protect");
     let handle=unsafe{CreateFileW(name.as_ptr(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,null(),OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,null_mut())};
     if handle==INVALID_HANDLE_VALUE{return Err(std::io::Error::last_os_error()).context("无法打开保护驱动设备");}Ok(handle)
 }
@@ -117,22 +117,22 @@ fn stage_driver_package(inf:&PathBuf)->Result<()>{
 fn driver_path()->Result<PathBuf>{
     if let Some(path)=std::env::var_os("SILVERFOX_DRIVER_PATH").map(PathBuf::from){if path.exists(){return Ok(path);}}
     let base=std::env::current_exe()?.parent().context("无法确定程序目录")?.to_path_buf();
-    for candidate in [base.join("driver").join("SilverFoxProtect.sys"),base.join("SilverFoxProtect.sys")]{if candidate.exists(){return Ok(candidate);}}
-    anyhow::bail!("程序目录中没有 driver\\SilverFoxProtect.sys")
+    for candidate in [base.join("driver").join("Protect.sys"),base.join("Protect.sys")]{if candidate.exists(){return Ok(candidate);}}
+    anyhow::bail!("程序目录中没有 driver\\Protect.sys")
 }
 
 pub fn activate()->Result<String>{
     if send_ioctl(IOCTL_SF_PROTECT_CALLER).is_ok(){return Ok("自我保护已启用（驱动原已运行）".into());}
     let path=driver_path()?;let path_text=path.to_string_lossy().into_owned();
-    let exists=run_sc(&["query","SilverFoxProtect"]).is_ok();
-    if exists{run_sc(&["config","SilverFoxProtect","type=","kernel","start=","demand","binPath=",&path_text])?;}else{let inf=path.with_file_name("SilverFoxProtect.inf");if inf.exists(){stage_driver_package(&inf)?;}if run_sc(&["query","SilverFoxProtect"]).is_err(){run_sc(&["create","SilverFoxProtect","type=","kernel","start=","demand","binPath=",&path_text,"DisplayName=","SilverFox Rescue Process Protection"])?;}}
-    let start_error=run_sc(&["start","SilverFoxProtect"]).err();
+    let exists=run_sc(&["query","Protect"]).is_ok();
+    if exists{run_sc(&["config","Protect","type=","kernel","start=","demand","binPath=",&path_text])?;}else{let inf=path.with_file_name("Protect.inf");if inf.exists(){stage_driver_package(&inf)?;}if run_sc(&["query","Protect"]).is_err(){run_sc(&["create","Protect","type=","kernel","start=","demand","binPath=",&path_text,"DisplayName=","Protect"])?;}}
+    let start_error=run_sc(&["start","Protect"]).err();
     let mut last=None;for _ in 0..20{match send_ioctl(IOCTL_SF_PROTECT_CALLER){Ok(())=>return Ok("自我保护已启用：当前进程已由内核回调保护".into()),Err(e)=>last=Some(e)}thread::sleep(Duration::from_millis(100));}
     let device_error=last.map(|e|e.to_string()).unwrap_or_else(||"保护驱动启动后设备仍不可用".into());
     if let Some(error)=start_error{anyhow::bail!("驱动服务启动失败：{}；设备连接失败：{}",error,device_error);}anyhow::bail!(device_error)
 }
 
-pub fn deactivate(){let _=send_ioctl(IOCTL_SF_CLEAR_PROTECTION);let _=run_sc(&["stop","SilverFoxProtect"]);}
+pub fn deactivate(){let _=send_ioctl(IOCTL_SF_CLEAR_PROTECTION);let _=run_sc(&["stop","Protect"]);}
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum SignatureState{Unsigned,Valid,Tampered,Revoked,Untrusted,Expired,NotTrusted,Error}

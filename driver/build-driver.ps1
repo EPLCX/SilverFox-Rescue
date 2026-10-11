@@ -16,14 +16,14 @@ $kitVersion = Get-ChildItem (Join-Path $kitRoot 'Include') -Directory |
     Select-Object -First 1 -ExpandProperty Name
 if (-not $kitVersion) { throw 'Windows Driver Kit kernel headers not found.' }
 
-$driverTarget = Join-Path $targetRoot 'silverfox-driver'
+$driverTarget = Join-Path $targetRoot 'protect-driver'
 $objectDirectory = Join-Path $driverTarget 'obj'
 $outputDirectory = Join-Path $driverTarget 'build'
 $packageDirectory = Join-Path $driverTarget 'package'
 New-Item -ItemType Directory -Force -Path $objectDirectory,$outputDirectory,$packageDirectory | Out-Null
-$source = Join-Path $PSScriptRoot 'SilverFoxProtect.c'
-$object = Join-Path $objectDirectory 'SilverFoxProtect.obj'
-$driver = Join-Path $outputDirectory 'SilverFoxProtect.sys'
+$source = Join-Path $PSScriptRoot 'Protect.c'
+$object = Join-Path $objectDirectory 'Protect.obj'
+$driver = Join-Path $outputDirectory 'Protect.sys'
 $includeKm = Join-Path $kitRoot "Include\$kitVersion\km"
 $includeShared = Join-Path $kitRoot "Include\$kitVersion\shared"
 $libKm = Join-Path $kitRoot "Lib\$kitVersion\km\x64"
@@ -37,7 +37,7 @@ cmd.exe /d /s /c $link
 if ($LASTEXITCODE -ne 0) { throw "Driver link failed with exit code $LASTEXITCODE" }
 
 Copy-Item -LiteralPath $driver -Destination $packageDirectory -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'SilverFoxProtect.inf') -Destination $packageDirectory -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Protect.inf') -Destination $packageDirectory -Force
 $inf2cat = Join-Path $kitRoot "bin\$kitVersion\x86\Inf2Cat.exe"
 if (Test-Path -LiteralPath $inf2cat) {
     & $inf2cat "/driver:$packageDirectory" /os:10_X64 /uselocaltime

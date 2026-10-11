@@ -13,7 +13,7 @@ Python 工具的默认路径集中在 `tool_paths.py`，以脚本所在的项目
 | Rust 编译产物 | `CARGO_TARGET_DIR` 指定目录 | 按进程、用户、系统环境变量的顺序读取 |
 | 训练、编译临时文件 | `<CARGO_TARGET_DIR>\tmp` | 自动设置 |
 | C++ DLL 中间文件 | `<CARGO_TARGET_DIR>\silverfox-engine` | `engine/build-engine.bat` 自动使用 |
-| 驱动中间文件及打包文件 | `<CARGO_TARGET_DIR>\silverfox-driver` | `driver/build-driver.ps1` 自动使用 |
+| 驱动中间文件及打包文件 | `<CARGO_TARGET_DIR>\protect-driver` | `driver/build-driver.ps1` 自动使用 |
 
 `SILVERFOX_KEY_DIR`、`SILVERFOX_DIST_DIR`、`SILVERFOX_ENGINE_DLL` 支持绝对路径；相对路径从项目根目录解析，也支持 `~`。前两项同时适用于 `build.ps1`。发布站点通过 `SILVERFOX_CLOUD_URL` 设置，签名菜单可逐次修改文件路径和站点。
 

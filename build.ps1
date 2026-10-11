@@ -66,14 +66,14 @@ try {
     try { Copy-Item -LiteralPath $versionedExe -Destination (Join-Path $output 'silverfox-rescue.exe') -Force -ErrorAction Stop }
     catch { Write-Host "Default executable could not be replaced. Versioned output: $versionedExe" }
     $driverRoot = Join-Path $projectRoot 'driver'
-    $driverPackage = Join-Path $targetRoot 'silverfox-driver\package'
+    $driverPackage = Join-Path $targetRoot 'protect-driver\package'
     if (-not $buildDllRequested -and -not (Test-Path -LiteralPath $driverPackage -PathType Container)) {
         $driverPackage = Join-Path $driverRoot 'build\package'
     }
     $driverProducts = @(
-        (Join-Path $driverPackage 'SilverFoxProtect.sys'),
-        (Join-Path $driverPackage 'SilverFoxProtect.inf'),
-        (Join-Path $driverPackage 'silverfoxprotect.cat')
+        (Join-Path $driverPackage 'Protect.sys'),
+        (Join-Path $driverPackage 'Protect.inf'),
+        (Join-Path $driverPackage 'Protect.cat')
     )
     if ($buildDllRequested) {
         $kitInstall = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue
