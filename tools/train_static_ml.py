@@ -274,8 +274,8 @@ def safe_categories(path: Path, data: bytes, catalog: dict) -> tuple[str, ...]:
     return tuple(classify(path, data)["categories"])
 
 
-def load_samples(dataset: Path, safe_catalog: dict | None = None, *, feature_extractor=extract_features, valid_pe_index=267, exclude_others_virus=False, extraction_workers=2) -> tuple[list[Sample], list[dict[str, object]]]:
-    definitions = [("safe", 0), ("virus", 1)] if exclude_others_virus else [("safe", 0), ("others-virus", 1), ("virus", 1)]
+def load_samples(dataset: Path, safe_catalog: dict | None = None, *, feature_extractor=extract_features, valid_pe_index=267, extraction_workers=2) -> tuple[list[Sample], list[dict[str, object]]]:
+    definitions = [("safe", 0), ("virus", 1)]
     samples: list[Sample] = []
     skipped: list[dict[str, object]] = []
     metadata_function(ENGINE_DLL)

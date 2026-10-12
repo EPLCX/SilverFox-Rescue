@@ -594,8 +594,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=os.environ.get("SILVERFOX_DATASET_DIR"),
                         required=not bool(os.environ.get("SILVERFOX_DATASET_DIR")))
-    parser.add_argument("--exclude-others-virus", action="store_true",
-                        help="exclude the others-virus directory before reading samples")
     parser.add_argument("--extraction-workers", type=int, choices=range(1, 17), default=2,
                         help="feature extraction threads; use 1 to reduce peak memory")
     parser.add_argument("--header", type=Path, default=MODEL_HEADER)
@@ -619,7 +617,6 @@ def main():
     safe_catalog = load_safe_catalog(args.safe_classification)
     samples, skipped = load_samples(args.dataset, safe_catalog, feature_extractor=extract_feature_vector,
                                     valid_pe_index=FEATURE_NAMES.index("valid_pe"),
-                                    exclude_others_virus=args.exclude_others_virus,
                                     extraction_workers=args.extraction_workers)
     samples.extend(load_extra_safe(args.extra_safe, safe_catalog, feature_extractor=extract_feature_vector,
                                    valid_pe_index=FEATURE_NAMES.index("valid_pe")))
@@ -738,7 +735,7 @@ def main():
         "dataset": str(args.dataset), "feature_count": len(FEATURE_NAMES), "feature_names": FEATURE_NAMES,
         "feature_importance_gain": dict(zip(FEATURE_NAMES, map(float, final.booster_.feature_importance(importance_type="gain")))),
         "extra_safe_paths": [str(path) for path in args.extra_safe],
-        "excluded_dataset_categories": ["others-virus"] if args.exclude_others_virus else [],
+        "dataset_categories": ["safe", "virus"],
         "class_names": classes, "class_counts": dict(zip(classes, map(int, counts))),
         "sample_count": len(y), "final_fit_count": len(y), "virus_pe_samples": int(focus.sum()),
         "tree_count": len(tree[0]), "node_count": len(tree[3]), "supported_input": "valid_pe_only",

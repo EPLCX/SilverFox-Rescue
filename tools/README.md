@@ -72,4 +72,6 @@ python tools\check_native_parity.py --engine <算法DLL路径>
 .\tools\provision-mtls-identity.ps1
 ```
 
+训练读取 `safe/` 和 `virus/`。`safe/` 对应 Safe，`virus/<家族>/` 对应病毒家族；直接放在 `virus/` 下的样本对应 Generic。
+
 `verify_fixed_auth.py` 是旧动态服务的联网认证检查工具，使用 `--base-url` 明确指定服务。证书、设备身份、令牌默认取自上面的统一目录，也可通过原有的 `--cert`、`--key`、`--device-id-file`、`--device-key-file`、`--token-file` 参数指定。
