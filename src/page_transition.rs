@@ -4,8 +4,8 @@ use windows_sys::Win32::{
     Foundation::{HWND, RECT},
     Graphics::Gdi::{
         AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
-        DeleteObject, FillRect, GetStockObject, InvalidateRect, SelectObject,
-        AC_SRC_OVER, BLENDFUNCTION, HBITMAP, HDC, HGDIOBJ, SRCCOPY, WHITE_BRUSH,
+        CreateSolidBrush, DeleteObject, FillRect, InvalidateRect, SelectObject,
+        AC_SRC_OVER, BLENDFUNCTION, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
     },
     UI::WindowsAndMessaging::{
         IsIconic, KillTimer, SetTimer, SystemParametersInfoW,
@@ -141,7 +141,7 @@ pub unsafe fn blend(hwnd: HWND, destination: HDC) {
         let top = transition.top;
         let offset = transition.offset.min(width);
         let content = RECT { left: 0, top, right: width, bottom };
-        let white = GetStockObject(WHITE_BRUSH);
+        let white = CreateSolidBrush(crate::theme::background());
         FillRect(frame.dc, &content, white);
         // Remove shared buttons from the moving source, then restore them in
         // place. This also prevents a shifted duplicate of the same button.
@@ -151,7 +151,7 @@ pub unsafe fn blend(hwnd: HWND, destination: HDC) {
             .filter(|rect|rect.top >= top && rect.bottom <= bottom).collect();
         for rect in &fixed {
             if BitBlt(frame.dc, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
-                destination, rect.left, rect.top, SRCCOPY) == 0 { return; }
+                destination, rect.left, rect.top, SRCCOPY) == 0 { DeleteObject(white);return; }
         }
         for rect in &fixed { FillRect(destination, rect, white); }
         let moved = offset == 0 || BitBlt(destination, offset, top, width - offset, bottom - top,
@@ -168,6 +168,7 @@ pub unsafe fn blend(hwnd: HWND, destination: HDC) {
             BitBlt(destination, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
                 frame.dc, rect.left, rect.top, SRCCOPY);
         }
+        DeleteObject(white);
         if !moved || !blended {
             transition.frame = None;
             transition.started = None;

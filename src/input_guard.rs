@@ -236,7 +236,6 @@ pub unsafe fn dispatch_message(message:&MSG)->LRESULT{
 pub unsafe fn physical_gesture(hwnd:HWND,_handle:windows_sys::Win32::UI::Input::Touch::HGESTUREINFO)->bool{
     input_source().is_some_and(hardware_source)&&GetForegroundWindow()==hwnd&&IsWindowEnabled(hwnd)!=0&&InSendMessageEx(std::ptr::null())==0
 }
-pub fn rejected_automation()->bool{REJECTED_AUTOMATION.with(Cell::get)}
 pub unsafe fn physical_message(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->bool{
     REJECTED_AUTOMATION.with(|value|value.set(false));
     if !guarded(hwnd){return true;}

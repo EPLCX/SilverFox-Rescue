@@ -26,12 +26,12 @@ pub unsafe fn paint(dc:HDC,client:&RECT,dpi:i32,show_text:bool){
     let values=[gpu,page.threads.as_str(),page.value.update_channel.as_str(),hidden,protection];
     let field_ids=[crate::ID_SETTINGS_GPU,crate::ID_SETTINGS_THREADS,crate::ID_SETTINGS_CHANNEL,crate::ID_SETTINGS_ACCESSIBILITY,crate::ID_SETTINGS_INPUT_PROTECTION];
     for i in 0..5{
-        fill(dc,ui.rows[i],0x00FFFFFF);
-        if show_text{label(dc,ui.rows[i],names[i],INK);}
-        let background=if crate::VIRTUAL_HOT==field_ids[i]{0x00E0E0E0}else{0x00FFFFFF};
-        if crate::ui_rounding::enabled(){crate::ui_rounding::control(dc,ui.fields[i].rect(),background,Some(BORDER),0x00FFFFFF,scale(4,dpi).max(1));}
-        else{fill(dc,ui.fields[i],background);outline(dc,ui.fields[i],BORDER);}
-        if show_text{label(dc,ui.fields[i],values[i],INK);}
+        fill(dc,ui.rows[i],crate::theme::color(0x00FFFFFF));
+        if show_text{label(dc,ui.rows[i],names[i],crate::theme::color(INK));}
+        let background=if crate::VIRTUAL_HOT==field_ids[i]{crate::theme::color(0x00E0E0E0)}else{crate::theme::color(0x00FFFFFF)};
+        if crate::ui_rounding::enabled(){crate::ui_rounding::control(dc,ui.fields[i].rect(),background,Some(crate::theme::color(BORDER)),crate::theme::color(0x00FFFFFF),scale(4,dpi).max(1));}
+        else{fill(dc,ui.fields[i],background);outline(dc,ui.fields[i],crate::theme::color(BORDER));}
+        if show_text{label(dc,ui.fields[i],values[i],crate::theme::color(INK));}
     }
     SelectObject(dc,old_font);
 }
@@ -42,7 +42,21 @@ pub unsafe fn click(hwnd:HWND,x:i32,y:i32)->bool{
     let Some(index)=ui.fields.iter().position(|field|field.contains(x,y))else{return false;};
     focus_field(hwnd,index);if index!=1{cycle_field(hwnd,index);}invalidate_all(hwnd);true
 }
-pub unsafe fn input(hwnd:HWND,ch:u32)->bool{let mut page=page().lock().unwrap_or_else(|error|error.into_inner());if page.focus!=Focus::Threads{return false;}if ch!=8&&char::from_u32(ch).filter(|c|c.is_ascii_digit()).is_none(){return false;}let replace=page.replace_on_type;page.replace_on_type=false;if ch==8{page.threads.pop();}else if let Some(digit)=char::from_u32(ch){if replace{page.threads.clear();}if page.threads.len()<5{page.threads.push(digit);}}drop(page);let mut client=std::mem::zeroed();GetClientRect(hwnd,&mut client);invalidate_box(hwnd,layout(&client,dpi::window_dpi(hwnd).max(96)as i32).fields[1]);crate::virtual_accessibility::announce_setting(hwnd,crate::ID_SETTINGS_THREADS);true}
+/// Edit the numeric field from the already validated key-down message.
+/// IMEs can replace the virtual key with VK_PROCESSKEY; its scan code remains.
+pub unsafe fn key_input(hwnd:HWND,key:u32,lparam:isize)->bool{
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState,MapVirtualKeyW,MAPVK_VSC_TO_VK_EX,VK_PROCESSKEY,VK_CONTROL,VK_MENU,VK_SHIFT};
+    if GetKeyState(VK_CONTROL as i32)<0||GetKeyState(VK_MENU as i32)<0{return false;}
+    let key=if key==VK_PROCESSKEY as u32{MapVirtualKeyW(((lparam>>16)&0xff)as u32,MAPVK_VSC_TO_VK_EX)}else{key};
+    let ch=match key{
+        8=>8,
+        0x30..=0x39 if GetKeyState(VK_SHIFT as i32)>=0=>key,
+        0x60..=0x69=>b'0' as u32+key-0x60,
+        _=>return false,
+    };
+    input(hwnd,ch)
+}
+unsafe fn input(hwnd:HWND,ch:u32)->bool{let mut page=page().lock().unwrap_or_else(|error|error.into_inner());if page.focus!=Focus::Threads{return false;}if ch!=8&&char::from_u32(ch).filter(|c|c.is_ascii_digit()).is_none(){return false;}let replace=page.replace_on_type;page.replace_on_type=false;if ch==8{page.threads.pop();}else if let Some(digit)=char::from_u32(ch){if replace{page.threads.clear();}if page.threads.len()<5{page.threads.push(digit);}}drop(page);let mut client=std::mem::zeroed();GetClientRect(hwnd,&mut client);invalidate_box(hwnd,layout(&client,dpi::window_dpi(hwnd).max(96)as i32).fields[1]);crate::virtual_accessibility::announce_setting(hwnd,crate::ID_SETTINGS_THREADS);true}
 pub unsafe fn clear_focus(hwnd:HWND){page().lock().unwrap_or_else(|error|error.into_inner()).focus=Focus::None;invalidate_all(hwnd);}
 pub unsafe fn focus_field(hwnd:HWND,index:usize){let mut page=page().lock().unwrap_or_else(|error|error.into_inner());page.focus=match index{0=>Focus::Gpu,1=>Focus::Threads,2=>Focus::Channel,3=>Focus::HideControls,4=>Focus::InputProtection,_=>Focus::None};page.replace_on_type=index==1;drop(page);invalidate_all(hwnd);}
 pub unsafe fn activate_focused(hwnd:HWND){

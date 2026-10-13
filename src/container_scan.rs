@@ -35,19 +35,25 @@ impl Members {
     }
 }
 
-pub fn zip<R: Read + Seek>(reader: R) -> Result<Members> {
-    let mut archive = zip::ZipArchive::new(reader).context("ZIP 目录损坏")?;
-    let mut out = Members::new();
-    let mut total: u64 = 0;
-    if archive.len() > MAX_MEMBERS { out.skipped += archive.len() - MAX_MEMBERS; }
-    for index in 0..archive.len().min(MAX_MEMBERS) {
-        let entry = archive.by_index(index).with_context(|| format!("ZIP 成员 {} 无法解析", index))?;
-        if entry.is_dir() { continue; }
-        let name = entry.name().to_string();
-        let size = entry.size();
-        out.push(name, entry, size, &mut total, None)?;
+#[cfg(test)]
+pub fn zip<R: Read + Seek>(reader:R)->Result<Members>{
+    Ok(zip_cancellable(reader,None)?.expect("uncancellable ZIP scan"))
+}
+
+pub fn zip_cancellable<R:Read+Seek>(reader:R,cancelled:Option<&AtomicBool>)->Result<Option<Members>>{
+    if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
+    let mut archive=zip::ZipArchive::new(reader).context("ZIP 目录损坏")?;
+    let mut out=Members::new();let mut total=0u64;
+    if archive.len()>MAX_MEMBERS{out.skipped+=archive.len()-MAX_MEMBERS;}
+    for index in 0..archive.len().min(MAX_MEMBERS){
+        if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
+        let entry=archive.by_index(index).with_context(||format!("ZIP 成员 {} 无法解析",index))?;
+        if entry.is_dir(){continue;}
+        let name=entry.name().to_string();let size=entry.size();
+        if !out.push(name,entry,size,&mut total,cancelled)?{return Ok(None);}
     }
-    Ok(out)
+    if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
+    Ok(Some(out))
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 use crate::model::{Finding, ProcessFinding, Verdict};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::{collections::{HashMap, HashSet}, fs::{File, OpenOptions}, io::{Read, Seek, SeekFrom}, mem::size_of, os::windows::fs::OpenOptionsExt, path::{Path, PathBuf}, sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant, SystemTime}};
+use std::{collections::{HashMap, HashSet}, fs::{File, OpenOptions}, io::{Read, Seek, SeekFrom}, mem::size_of, os::windows::fs::OpenOptionsExt, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, TryLockError, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant, SystemTime}};
 #[cfg(test)] use walkdir::WalkDir;
 use windows_sys::Win32::{Foundation::{CloseHandle,DuplicateHandle,FILETIME,HANDLE,INVALID_HANDLE_VALUE,DUPLICATE_SAME_ACCESS,WAIT_OBJECT_0},Security::{AdjustTokenPrivileges,LookupPrivilegeValueW,LUID_AND_ATTRIBUTES,SE_BACKUP_NAME,SE_PRIVILEGE_ENABLED,TOKEN_ADJUST_PRIVILEGES,TOKEN_PRIVILEGES,TOKEN_QUERY},Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_FLAG_SEQUENTIAL_SCAN,FILE_SHARE_DELETE,FILE_SHARE_READ,FILE_SHARE_WRITE},System::{Diagnostics::ToolHelp::{CreateToolhelp32Snapshot,Process32FirstW,Process32NextW,PROCESSENTRY32W,TH32CS_SNAPPROCESS},IO::CancelSynchronousIo,Threading::{CreateEventW,GetCurrentProcess,GetCurrentThread,GetProcessTimes,GetSystemTimes,OpenProcess,OpenProcessToken,ResetEvent,SetEvent,WaitForSingleObject,PROCESS_QUERY_LIMITED_INFORMATION}}};
 
@@ -22,6 +22,19 @@ pub fn interrupt_active_scan_io(){unsafe{SetEvent(cancel_event());}if let Ok(thr
 pub struct ActiveIoThread{handle:isize}
 impl Drop for ActiveIoThread{fn drop(&mut self){if let Ok(mut threads)=active_io_threads().lock(){threads.retain(|handle|*handle!=self.handle);}unsafe{CloseHandle(self.handle as HANDLE);}}}
 pub fn register_scan_io_thread()->Option<ActiveIoThread>{unsafe{let process=GetCurrentProcess();let mut handle:HANDLE=std::ptr::null_mut();let ok=DuplicateHandle(process,GetCurrentThread(),process,&mut handle,0,0,DUPLICATE_SAME_ACCESS);if ok==0{return None;}let handle=handle as isize;active_io_threads().lock().ok()?.push(handle);Some(ActiveIoThread{handle})}}
+
+// Waiting workers must leave without acquiring a large sample's lock after Stop.
+fn lock_for_scan<'a,T>(lock:&'a Mutex<T>,cancelled:Option<&AtomicBool>)->Option<MutexGuard<'a,T>>{
+    if cancelled.is_none(){return Some(lock.lock().unwrap_or_else(|error|error.into_inner()));}
+    loop{
+        if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return None;}
+        match lock.try_lock(){
+            Ok(guard)=>return Some(guard),
+            Err(TryLockError::Poisoned(error))=>return Some(error.into_inner()),
+            Err(TryLockError::WouldBlock)=>std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
 
 struct ProcessCacheEntry { length:u64, modified:Option<SystemTime>, scanned_at:Instant, finding:Finding }
 
@@ -107,7 +120,14 @@ impl Scanner {
 
     pub fn already_scanned(&self,path:&Path)->bool {
         let slot=self.file_cache.lock().unwrap_or_else(|e|e.into_inner()).get(&Self::path_key(path)).cloned();
-        slot.is_some_and(|slot|slot.lock().unwrap_or_else(|e|e.into_inner()).is_some())
+        slot.is_some_and(|slot|{
+            let scanned=match slot.try_lock(){
+                Ok(cached)=>cached.is_some(),
+                Err(TryLockError::Poisoned(error))=>error.into_inner().is_some(),
+                Err(TryLockError::WouldBlock)=>false,
+            };
+            scanned
+        })
     }
 
     pub fn scan_file_cancellable(&self, path: &Path, cancelled:&AtomicBool) -> Option<Finding> {
@@ -117,15 +137,17 @@ impl Scanner {
         }
         if !self.session_dedup.load(Ordering::Relaxed){return match self.scan_file_inner(path,Some(cancelled)){
             Ok(finding)=>finding,
+            Err(_) if cancelled.load(Ordering::Acquire)=>None,
             Err(error)=>Some(Finding{path:path.into(),sha256:None,verdict:Verdict::Incomplete,score:0,evidence:vec![error.to_string()],source:"local".into()}),
         };}
         let slot=self.file_cache.lock().unwrap_or_else(|e|e.into_inner()).entry(Self::path_key(path)).or_insert_with(||Arc::new(Mutex::new(None))).clone();
         // One lock per sample keeps workers parallel while duplicate paths wait for its verdict.
-        let mut cached=slot.lock().unwrap_or_else(|e|e.into_inner());
+        let mut cached=lock_for_scan(&slot,Some(cancelled))?;
         if cancelled.load(Ordering::Acquire){return None;}
         if let Some(finding)=cached.as_ref(){let mut finding=finding.clone();finding.path=path.into();return Some(finding);}
         let finding=match self.scan_file_inner(path, Some(cancelled)) {
             Ok(finding) => finding,
+            Err(_) if cancelled.load(Ordering::Acquire)=>None,
             Err(error) => Some(Finding { path: path.into(), sha256: None, verdict: Verdict::Incomplete, score: 0, evidence: vec![error.to_string()], source: "local".into() }),
         };
         if let Some(finding)=finding.as_ref(){if finding.sha256.is_some()||finding.unsupported_non_pe()||finding.verdict==Verdict::Clean{*cached=Some(finding.clone());}}
@@ -133,6 +155,7 @@ impl Scanner {
     }
 
     fn scan_file_inner(&self, path: &Path, cancelled:Option<&AtomicBool>) -> Result<Option<Finding>> {
+        if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
         let mut f = open_file_for_scan(path).with_context(|| format!("无法只读打开 {}（普通读取和备份权限读取均失败）", path.display()))?;
         let meta = f.metadata().with_context(|| format!("无法读取 {} 的文件信息", path.display()))?;
         if !meta.is_file() { anyhow::bail!("不是普通文件"); }
@@ -156,15 +179,23 @@ impl Scanner {
             return Ok(Some(Finding{path:path.into(),sha256:None,verdict:Verdict::Incomplete,score:0,evidence:vec!["非 PE 文件未命中受支持的专项检测".into()],source:"local-ml".into()}));
         }
         if meta.len() > MAX_FILE { anyhow::bail!("文件超过 256 MB 安全上限"); }
-        let _large_guard=if meta.len()>16*1024*1024||is_zip||is_msi{Some(LARGE_SCAN_LOCK.lock().unwrap_or_else(|error|error.into_inner()))}else{None};
+        let _large_guard=if meta.len()>16*1024*1024||is_zip||is_msi{
+            match lock_for_scan(&LARGE_SCAN_LOCK,cancelled){Some(guard)=>Some(guard),None=>return Ok(None)}
+        }else{None};
+        if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
         let mut hash = Sha256::new();
         let mut sample = Vec::new();
         let sample_limit=if is_zip||is_msi{ARCHIVE_HEADER_LIMIT}else{READ_LIMIT as usize};
         sample.try_reserve_exact((meta.len() as usize).min(sample_limit)).context("扫描内存不足")?;
         let mut buf = [0u8; 64 * 1024];
+        let mut read_bytes=0u64;
         loop {
+            if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
             let n=match f.read(&mut buf){Ok(n)=>n,Err(_error)if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire))=>return Ok(None),Err(error)=>return Err(error.into())};
+            if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
             if n == 0 { break; }
+            read_bytes+=n as u64;
+            if read_bytes>MAX_FILE{anyhow::bail!("文件在读取期间超过 256 MB 安全上限");}
             hash.update(&buf[..n]);
             if sample.len() < sample_limit {
                 let take = n.min(sample_limit - sample.len());
@@ -178,9 +209,8 @@ impl Scanner {
         if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)) { return Ok(None); }
         if is_zip || is_msi {
             f.seek(SeekFrom::Start(0))?;
-            let members = if is_zip { crate::container_scan::zip(f)? } else {
-                match crate::container_scan::msi_cancellable(f, cancelled)? { Some(members) => members, None => return Ok(None) }
-            };
+            let members=if is_zip{crate::container_scan::zip_cancellable(f,cancelled)?}else{crate::container_scan::msi_cancellable(f,cancelled)?};
+            let Some(members)=members else{return Ok(None);};
             let mut verdict=Verdict::Clean;
             let mut score=0;
             let mut evidence=Vec::new();
@@ -190,10 +220,12 @@ impl Scanner {
                 if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)) { return Ok(None); }
                 let virtual_path=PathBuf::from(format!("{}!{}",path.display(),member.name));
                 let gpu=crate::gpu_scan::ml_histograms(&member.sample);
+                if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
                 let decision=self.engine.scan(&crate::engine_host::FileFacts{
                     path:&virtual_path,sample:&member.sample,total_len:member.len,signature_state:0,
                     embedded_certificate:false,siblings:&[],gpu_prefilter_hits:None,gpu_ml_histograms:gpu.as_deref(),
                 })?;
+                if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
                 if crate::model::unsupported_file_decision(&decision.verdict,&decision.evidence){continue;}
                 scanned+=1;
                 if matches!(decision.verdict,Verdict::Malicious|Verdict::Suspicious)
@@ -226,6 +258,7 @@ impl Scanner {
             embedded_certificate:false,
             siblings:&siblings,gpu_prefilter_hits:None,gpu_ml_histograms:gpu_ml_histograms.as_deref(),
         })?;
+        if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
         if matches!(decision.verdict,Verdict::Malicious|Verdict::Suspicious)
             && sample.len() as u64==meta.len()
             && crate::self_signature::verify_project_signed_bytes(&sample,&self.version){

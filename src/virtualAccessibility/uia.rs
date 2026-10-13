@@ -40,7 +40,7 @@ unsafe extern "system" fn property(this:*mut c_void,id:i32,out:*mut VARIANT)->i3
     if out.is_null(){return E_INVALIDARG;}*out=std::mem::zeroed();let owner=node(this);let entry=found(owner);let is_root=(*owner).id==0;
     match id{
         UIA_NamePropertyId=>out_text(out,&entry.as_ref().map(|item|item.name.clone()).unwrap_or_else(||root_name((*owner).hwnd))),
-        UIA_ControlTypePropertyId=>out_i4(out,entry.as_ref().map(|item|match item.role{ROLE_SYSTEM_PUSHBUTTON=>UIA_ButtonControlTypeId,ROLE_SYSTEM_CHECKBUTTON=>UIA_CheckBoxControlTypeId,ROLE_SYSTEM_COMBOBOX=>UIA_ComboBoxControlTypeId,ROLE_SYSTEM_LISTITEM=>UIA_ListItemControlTypeId,ROLE_SYSTEM_PROGRESSBAR=>UIA_ProgressBarControlTypeId,_=>if item.id==ID_SETTINGS_THREADS||item.id==ID_DIRECTORY_INPUT{UIA_EditControlTypeId}else{UIA_TextControlTypeId}}).unwrap_or(UIA_PaneControlTypeId)),
+        UIA_ControlTypePropertyId=>out_i4(out,entry.as_ref().map(|item|match item.role{ROLE_SYSTEM_PUSHBUTTON=>UIA_ButtonControlTypeId,ROLE_SYSTEM_CHECKBUTTON=>UIA_CheckBoxControlTypeId,ROLE_SYSTEM_COMBOBOX=>UIA_ComboBoxControlTypeId,ROLE_SYSTEM_LISTITEM=>UIA_ListItemControlTypeId,ROLE_SYSTEM_PROGRESSBAR=>UIA_ProgressBarControlTypeId,_=>if item.id==ID_SETTINGS_THREADS{UIA_EditControlTypeId}else{UIA_TextControlTypeId}}).unwrap_or(UIA_PaneControlTypeId)),
         UIA_IsKeyboardFocusablePropertyId=>out_bool(out,entry.as_ref().map(|item|item.focusable).unwrap_or(true)),
         UIA_HasKeyboardFocusPropertyId=>out_bool(out,window_has_focus((*owner).hwnd)&&(is_root||(*owner).id==focused_id((*owner).hwnd))),
         UIA_IsEnabledPropertyId=>out_bool(out,IsWindowEnabled((*owner).hwnd)!=0),
@@ -48,7 +48,7 @@ unsafe extern "system" fn property(this:*mut c_void,id:i32,out:*mut VARIANT)->i3
         UIA_AutomationIdPropertyId=>out_text(out,&format!("silverfox.virtual.{}",(*owner).id)),
         UIA_NativeWindowHandlePropertyId=>out_i4(out,if is_root{(*owner).hwnd as usize as i32}else{0}),
         UIA_LiveSettingPropertyId if (*owner).id==ID_PAGE_DETAIL&&state().ui_mode.load(Ordering::Acquire)==1=>out_i4(out,Assertive),
-        UIA_ValueValuePropertyId if matches!((*owner).id,ID_SETTINGS_THREADS|ID_DIRECTORY_INPUT|ID_PAGE_DETAIL)=>out_text(out,entry.as_ref().map(|item|item.name.as_str()).unwrap_or("")),
+        UIA_ValueValuePropertyId if matches!((*owner).id,ID_SETTINGS_THREADS|ID_PAGE_DETAIL)=>out_text(out,entry.as_ref().map(|item|item.name.as_str()).unwrap_or("")),
         _=>S_OK,
     }
 }

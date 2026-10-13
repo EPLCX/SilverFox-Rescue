@@ -42,7 +42,7 @@ pub(super) unsafe fn paint(dc:HDC,rect:RECT,color:u32){
     if bitmap.is_null(){DeleteDC(memory);return;}
     let previous=SelectObject(memory,bitmap);
     let area=RECT{left:0,top:0,right:size,bottom:size};
-    FillRect(memory,&area,GetStockObject(WHITE_BRUSH)as HBRUSH);
+    crate::theme::fill(memory,&area);
     let brush=CreateSolidBrush(color);
     let old_brush=SelectObject(memory,brush);
     BeginPath(memory);

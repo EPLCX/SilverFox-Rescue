@@ -107,6 +107,10 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
         WM_ACTIVATE|WM_DWMCOMPOSITIONCHANGED|WM_SIZE=>{
             let result=DefWindowProcW(hwnd,msg,w,l);crate::configure_custom_frame(hwnd);result
         }
+        WM_SETTINGCHANGE|WM_THEMECHANGED=>{
+            crate::theme::refresh();crate::button_tones().lock().unwrap_or_else(|error|error.into_inner()).clear();
+            crate::configure_custom_frame(hwnd);InvalidateRect(hwnd,null(),0);DefWindowProcW(hwnd,msg,w,l)
+        }
         WM_NCPAINT=>crate::custom_frame_paint(hwnd,w,l),
         WM_NCACTIVATE=>crate::custom_frame_activate(hwnd,w),
         WM_DWMNCRENDERINGCHANGED=>{
@@ -146,12 +150,12 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             let memory=CreateCompatibleDC(screen);let bitmap=if memory.is_null(){null_mut()}else{CreateCompatibleBitmap(screen,client.right.max(1),client.bottom.max(1))};
             let dc=if bitmap.is_null(){screen}else{memory};let previous=if bitmap.is_null(){null_mut()}else{SelectObject(dc,bitmap)};
             let saved=SaveDC(dc);IntersectClipRect(dc,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right,ps.rcPaint.bottom);
-            FillRect(dc,&client,GetStockObject(WHITE_BRUSH)as HBRUSH);SetBkMode(dc,TRANSPARENT as i32);
+            crate::theme::fill(dc,&client);SetBkMode(dc,TRANSPARENT as i32);
             let dpi=crate::dpi::window_dpi(hwnd).max(96)as i32;let s=|n:i32|n*dpi/96;
             let old=SelectObject(dc,crate::paint_cache::font(-s(12)));
-            SetTextColor(dc,0x00000000);let mut title=RECT{left:s(14),top:0,right:dialog.close_rect.left,bottom:dialog.close_rect.bottom};DrawTextW(dc,dialog.title.as_ptr(),-1,&mut title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
+            SetTextColor(dc,crate::theme::color(0x00000000));let mut title=RECT{left:s(14),top:0,right:dialog.close_rect.left,bottom:dialog.close_rect.bottom};DrawTextW(dc,dialog.title.as_ptr(),-1,&mut title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
             crate::draw_shared_button(&control_item(hwnd,dc,dialog,dialog.buttons.len()+1),&[],false,crate::paint_cache::font(-s(12)));
-            SelectObject(dc,crate::paint_cache::font(-s(13)));SetTextColor(dc,0x00000000);
+            SelectObject(dc,crate::paint_cache::font(-s(13)));SetTextColor(dc,crate::theme::color(0x00000000));
             if !dialog.icon.is_null(){DrawIconEx(dc,s(24),s(68),dialog.icon,s(32),s(32),0,null_mut(),DI_NORMAL);}
             let text_saved=SaveDC(dc);IntersectClipRect(dc,dialog.text_rect.left,dialog.text_rect.top,dialog.text_rect.right,dialog.text_rect.bottom);
             let mut text=dialog.text_rect;text.top-=dialog.scroll.get();text.bottom=text.top+dialog.text_height;
@@ -200,7 +204,7 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
         }
         WM_KEYDOWN=>{
             if w==VK_TAB as usize{
-                dialog.keyboard.set(true);let mut order=vec![dialog.buttons.len()];order.extend(0..dialog.buttons.len());if dialog.close_result.is_some(){order.push(dialog.buttons.len()+1);}
+                dialog.keyboard.set(true);let mut order=vec![dialog.buttons.len()];order.extend(0..dialog.buttons.len());
                 if let Some(next)=crate::next_control_focus(&order,dialog.focus.get(),GetKeyState(VK_SHIFT as i32)<0){set_dialog_focus(hwnd,dialog,next);}return 0;
             }
             if matches!(w as u16,VK_LEFT|VK_RIGHT)&&dialog.focus.get()<dialog.buttons.len(){

@@ -88,6 +88,7 @@ const ID_DELETE_ALL: usize = 118;
 const ID_MINIMIZE: usize = 119;
 const ID_CLOSE: usize = 120;
 const ID_GITHUB: usize = 121;
+const ID_RESULTS_SKIP:usize=122;
 const ID_PAGE_HEADING: usize = 340;
 const ID_PAGE_DETAIL: usize = 341;
 const ID_VERSION_TEXT: usize = 343;
@@ -209,6 +210,7 @@ static mut KEYBOARD_FOCUS_VISIBLE:bool=false;
 static mut VIRTUAL_HOT:usize=0;
 static mut VIRTUAL_PRESSED:usize=0;
 static mut VIRTUAL_MENU_OPEN:bool=false;
+static mut RESULTS_SKIP_VISIBLE:bool=false;
 struct ButtonTone { from:u32, to:u32, started:Instant }
 impl ButtonTone {
     fn color_at(&self,now:Instant)->u32{
@@ -652,11 +654,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             update_progress(hwnd);
             drain_page_queue(hwnd);
-            let previous_mode=LAST_UI_MODE;
             let mode=state().ui_mode.load(Ordering::Acquire);
             let subpage=state().subpage.load(Ordering::Acquire);
             if mode!=LAST_UI_MODE||(mode==3&&subpage!=LAST_UI_SUBPAGE){apply_dpi_layout(hwnd,false);}else{sync_ui(hwnd);}
-            if previous_mode!=mode&&matches!(mode,2|UI_MODE_REMEDIATION_DONE){
+            if matches!(mode,2|UI_MODE_REMEDIATION_DONE){
                 let scan_start=state().scan_started_ms.load(Ordering::Acquire);
                 if scan_start!=0&&scan_start!=LAST_ANNOUNCED_SCAN_START{
                     LAST_ANNOUNCED_SCAN_START=scan_start;
@@ -857,6 +858,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
         WM_MOUSEWHEEL => {let delta=((w>>16)&0xffff)as i16;if state().ui_mode.load(Ordering::Acquire)==2 {scroll_results(hwnd,-delta as f64/120.0*(112*dpi::window_dpi(hwnd).max(96)/96)as f64,delta.unsigned_abs()>=120);}else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let max=list.lines.len().saturating_sub(1);list.scroll=if delta<0{(list.scroll+1).min(max)}else{list.scroll.saturating_sub(1)};InvalidateRect(hwnd,null(),0);}0 }
         WM_KEYDOWN => {
+            if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS&&VIRTUAL_FOCUS==ID_SETTINGS_THREADS
+                &&settings_ui::key_input(hwnd,w as u32,l){return 0;}
             if w==VK_TAB as usize{move_virtual_focus(hwnd,GetKeyState(VK_SHIFT as i32)<0);return 0;}
             if VIRTUAL_MENU_OPEN&&w==VK_ESCAPE as usize{VIRTUAL_MENU_OPEN=false;set_virtual_focus(hwnd,ID_MORE);return 0;}
             if VIRTUAL_MENU_OPEN&&(w==VK_UP as usize||w==VK_DOWN as usize){let current=MENU_IDS.iter().position(|id|*id==VIRTUAL_FOCUS);let next=match current{Some(current)if w==VK_UP as usize=>(current+MENU_IDS.len()-1)%MENU_IDS.len(),Some(current)=>(current+1)%MENU_IDS.len(),None if w==VK_UP as usize=>MENU_IDS.len()-1,None=>0};set_virtual_focus(hwnd,MENU_IDS[next]);return 0;}
@@ -881,7 +884,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             DefWindowProcW(hwnd,msg,w,l)
         }
-        WM_CHAR => {if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{settings_ui::input(hwnd,w as u32);0}else{DefWindowProcW(hwnd,msg,w,l)}}
+        WM_CHAR => {if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{0}else{DefWindowProcW(hwnd,msg,w,l)}}
         WM_SYSCOMMAND => {
             if w&0xfff0==SC_MINIMIZE as usize&&!input_guard::consume_system_command(hwnd,w)&&input_guard::protection_enabled(){record_blocked_control();return 0;}
             if w&0xfff0== SC_MAXIMIZE as usize {
@@ -918,6 +921,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 , ID_REMEDIATE => remediate(hwnd), ID_RESTORE => restore_selected(hwnd), ID_REPORT => {input_guard::post_internal(hwnd,WM_DEFERRED_NAVIGATE,PAGE_REPORT,0);}, ID_UPDATE => {input_guard::post_internal(hwnd,WM_DEFERRED_NAVIGATE,PAGE_PROGRAM_UPDATE,0);}, ID_SETTINGS => {input_guard::post_internal(hwnd,WM_DEFERRED_NAVIGATE,PAGE_SETTINGS,0);}, ID_CANCEL => {
                     record_blocked_control();
                 }
+                , ID_RESULTS_SKIP => {set_virtual_focus(hwnd,ID_DONE);}
                 , ID_MORE => show_more_menu(hwnd), ID_DONE => {let mode=state().ui_mode.load(Ordering::Acquire);if mode==UI_MODE_REMEDIATION_DONE{state().remediation_complete.store(false,Ordering::Release);return_to_home(hwnd);}else{remediate(hwnd)}}, ID_SKIP => {
                     if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{settings_ui::reset();save_settings_and_return(hwnd);}else if state().ui_mode.load(Ordering::Acquire)==UI_MODE_REMEDIATION_DONE{open_quarantine_page(hwnd);}else{return_to_home(hwnd);}
                 }, ID_BACK => {
@@ -1380,7 +1384,11 @@ unsafe fn sync_ui(hwnd:HWND){
     if mode==LAST_UI_MODE&&(mode!=3||subpage==LAST_UI_SUBPAGE){return;}
     LAST_UI_MODE=mode;LAST_UI_SUBPAGE=subpage;
     VIRTUAL_MENU_OPEN=false;
+    RESULTS_SKIP_VISIBLE=false;
     VIRTUAL_FOCUS=0;
+    if mode==2&&state().threat_count.load(Ordering::Relaxed)>0{
+        KEYBOARD_FOCUS_VISIBLE=true;set_virtual_focus(hwnd,ID_DONE);
+    }
     InvalidateRect(hwnd,null(),0);
 }
 
@@ -1448,7 +1456,7 @@ unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
 fn virtual_button_label(id:usize)->String{
     let current_mode=state().ui_mode.load(Ordering::Acquire);
     let terminal_no_threat=current_mode==UI_MODE_REMEDIATION_DONE&&state().remediation_total.load(Ordering::Relaxed)==0;
-    let label=match id {ID_QUICK=>"开始快速扫描".to_string(),ID_CANCEL=>"停止扫描".to_string(),ID_MORE=>"功能菜单".to_string(),ID_DONE=>if current_mode==UI_MODE_REMEDIATION_DONE{"完成".to_string()}else{"立即处理已勾选".to_string()},ID_SKIP=>if current_mode==3&&state().subpage.load(Ordering::Relaxed)==PAGE_SETTINGS{"恢复默认".to_string()}else if current_mode==UI_MODE_REMEDIATION_DONE&& !terminal_no_threat{"查看隔离区".to_string()}else{"暂不处理".to_string()},ID_BACK=>"返回".to_string(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".to_string(),_=>String::new()};
+    let label=match id {ID_QUICK=>"开始快速扫描".to_string(),ID_CANCEL=>"停止扫描".to_string(),ID_RESULTS_SKIP=>"跳到功能区".to_string(),ID_MORE=>"功能菜单".to_string(),ID_DONE=>if current_mode==UI_MODE_REMEDIATION_DONE{"完成".to_string()}else{"立即处理已勾选".to_string()},ID_SKIP=>if current_mode==3&&state().subpage.load(Ordering::Relaxed)==PAGE_SETTINGS{"恢复默认".to_string()}else if current_mode==UI_MODE_REMEDIATION_DONE&& !terminal_no_threat{"查看隔离区".to_string()}else{"暂不处理".to_string()},ID_BACK=>"返回".to_string(),ID_PAGE_ACTION=>state().page_action.lock().unwrap_or_else(|error|error.into_inner()).clone(),ID_DELETE_ALL=>"删除全部".to_string(),_=>String::new()};
     label
 }
 
@@ -1496,6 +1504,7 @@ unsafe fn virtual_buttons(hwnd:HWND)->Vec<(usize,RECT)>{
         },
         1=>buttons.push((ID_CANCEL,rect(client.right-s(145),s(70),s(105),s(40)))),
         2=>{
+            if RESULTS_SKIP_VISIBLE{buttons.push((ID_RESULTS_SKIP,rect(client.right-s(190),s(64),s(160),s(36))));}
             if state().threat_count.load(Ordering::Relaxed)>0{buttons.push((ID_DONE,rect(client.right-s(390),client.bottom-s(105),s(190),s(42))));}
             buttons.push((ID_SKIP,rect(client.right-s(185),client.bottom-s(105),s(150),s(42))));
         },
@@ -1572,6 +1581,7 @@ unsafe fn virtual_focus_order(hwnd:HWND)->Vec<usize>{
     }
     let buttons=virtual_buttons(hwnd);
     let findings=if mode==2{(0..alert_indices().len()).map(|row|ID_FINDING_FIRST+row).collect::<Vec<_>>()}else{Vec::new()};
+    if mode==2&&RESULTS_SKIP_VISIBLE{order.push(ID_RESULTS_SKIP);}
     order.extend(findings.iter().copied());
     for (id,_) in &buttons{if !matches!(*id,ID_MINIMIZE|ID_CLOSE)&&!order.contains(id){order.push(*id);}}
     order.retain(|id|buttons.iter().any(|(button,_)|button==id)||(ID_FINDING_FIRST..ID_FINDING_FIRST+findings.len()).contains(id)||matches!(*id,ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|ID_SETTINGS_INPUT_PROTECTION|202));
@@ -1582,6 +1592,7 @@ unsafe fn virtual_focus_order(hwnd:HWND)->Vec<usize>{
 unsafe fn set_virtual_focus(hwnd:HWND,id:usize){
     *pending_narration().lock().unwrap_or_else(|error|error.into_inner())=None;
     VIRTUAL_FOCUS=id;
+    RESULTS_SKIP_VISIBLE=state().ui_mode.load(Ordering::Acquire)==2&&id==ID_RESULTS_SKIP;
     if let Some(row)=finding_row(id){reveal_finding(hwnd,row);}
     if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{
         if let Some(index)=[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION].iter().position(|field|*field==id){settings_ui::focus_field(hwnd,index);}else{settings_ui::clear_focus(hwnd);}
@@ -1604,7 +1615,10 @@ fn next_control_focus(order:&[usize],current:usize,reverse:bool)->Option<usize>{
     Some(order[next])
 }
 unsafe fn move_virtual_focus(hwnd:HWND,reverse:bool){
-    if let Some(next)=next_control_focus(&virtual_focus_order(hwnd),VIRTUAL_FOCUS,reverse){set_virtual_focus(hwnd,next);}
+    if let Some(next)=next_control_focus(&virtual_focus_order(hwnd),VIRTUAL_FOCUS,reverse){
+        let entering_list=finding_row(next).is_some()&&finding_row(VIRTUAL_FOCUS).is_none()&&VIRTUAL_FOCUS!=ID_RESULTS_SKIP;
+        set_virtual_focus(hwnd,if entering_list{ID_RESULTS_SKIP}else{next});
+    }
 }
 
 unsafe fn paint_virtual_controls(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
@@ -1972,7 +1986,7 @@ unsafe fn flush_pending_narration(hwnd:HWND){
 }
 
 fn scan_result_announcement(cancelled:bool,failed:bool,threats:usize,done:usize,incomplete:usize)->(String,String){
-    let basic=if cancelled{"扫描已取消".into()}else if failed{"扫描失败".into()}else if threats>0{format!("扫描完成，发现 {threats} 个威胁")}else{"扫描完成，未发现威胁".into()};
+    let basic=if cancelled{"扫描已取消".into()}else if failed{"扫描失败".into()}else if threats>0{format!("发现 {threats} 个威胁")}else{"扫描完成，未发现威胁".into()};
     let mut detail=format!("已检查 {done} 项");
     if cancelled||failed{detail.push_str(&format!("，已发现 {threats} 个威胁"));}
     if incomplete>0{detail.push_str(&format!("，{incomplete} 项未完成检测"));}
@@ -2483,7 +2497,7 @@ fn direct_files(directory: &std:: path:: Path) -> std:: io:: Result<Vec<PathBuf>
     #[test] fn quick_scan_uses_expected_system_roots_and_depths(){
         let targets=default_quick_paths();
         let actual:Vec<_>=targets.iter().map(|target|(target.root.to_string_lossy().to_string(),target.max_depth)).collect();
-        assert!(actual.contains(&(r"C:\ProgramData".into(),4)));assert!(actual.contains(&(r"C:\inetpub\wwwroot".into(),16)));assert!(actual.contains(&(r"C:\Windows\Temp".into(),4)));assert!(actual.contains(&(r"C:\Windows\SystemTemp".into(),4)));assert!(actual.contains(&(r"C:\Users\Public".into(),3)));
+        assert!(actual.contains(&(r"C:\ProgramData".into(),2)));assert!(actual.contains(&(r"C:\inetpub\wwwroot".into(),16)));assert!(actual.contains(&(r"C:\Windows\Temp".into(),4)));assert!(actual.contains(&(r"C:\Windows\SystemTemp".into(),4)));assert!(actual.contains(&(r"C:\Users\Public".into(),3)));
     }
 
     #[test] fn quick_scan_user_roots_use_resolved_profile_not_process_environment(){
@@ -3029,15 +3043,15 @@ fn check_program_update_on_startup(hwnd:HWND) {
 
 fn default_quick_paths() -> Vec<ScanTarget> {
     let mut targets=vec![
-        ScanTarget::new(r"C:\ProgramData",4),
+        ScanTarget::new(r"C:\ProgramData",2),
         ScanTarget::new(r"C:\Program Files (x86)",2),
         ScanTarget::new(r"C:\Program Files",2),
-        ScanTarget::recursive(r"C:\Windows\Temp"),
-        ScanTarget::recursive(r"C:\Windows\SystemTemp"),
+        ScanTarget::new(r"C:\Windows\Temp",2),
+        ScanTarget::new(r"C:\Windows\SystemTemp",2),
         ScanTarget::new(r"C:\Users\Public",3),
-        ScanTarget::new(r"C:\inetpub\wwwroot",16),
+        ScanTarget::new(r"C:\inetpub\wwwroot",12),
     ];
-    for root in [PathBuf::from(r"C:\Drivers"),PathBuf::from(r"C:\Temp"),PathBuf::from(r"C:\Program Files(x86)")]
+    for root in [PathBuf::from(r"C:\Drivers"),PathBuf::from(r"C:\Temp")]
         .into_iter().chain(quick_scan::startup_directories()){
         if root.is_dir(){targets.push(ScanTarget::recursive(root));}
     }
