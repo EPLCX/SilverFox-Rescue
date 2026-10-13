@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use crate::hash::sha256;
 use std::{fs, io::{Cursor, Read, Write}, path::{Path,PathBuf}};
 use windows_sys::Win32::Storage::FileSystem::{MoveFileExW,MOVEFILE_REPLACE_EXISTING,MOVEFILE_WRITE_THROUGH};
 
@@ -39,7 +39,7 @@ pub fn embedded_engine()->Result<(Manifest,&'static [u8])>{
 pub fn repair_installed_package_from_embedded() -> Result<()> {
     let (manifest,_)=embedded_engine()?;
     let root=rules_root()?;
-    let digest=hex::encode(Sha256::digest(EMBEDDED_PACKAGE));
+    let digest=hex::encode(sha256(EMBEDDED_PACKAGE));
     let directory=root.join("versions").join(&digest);
     fs::create_dir_all(&directory)?;
     let package_path=directory.join("rules.package.zip");
@@ -70,7 +70,7 @@ fn read_installed_package_at(root:&Path)->Result<Option<(Vec<u8>,Manifest)>>{
         if digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()){anyhow::bail!("当前病毒库指针无效");}
         let directory=root.join("versions").join(digest);
         let bytes=fs::read(directory.join("rules.package.zip")).context("当前病毒库包缺失")?;
-        if hex::encode(Sha256::digest(&bytes))!=digest.to_ascii_lowercase(){anyhow::bail!("当前病毒库包与指针哈希不符");}
+        if hex::encode(sha256(&bytes))!=digest.to_ascii_lowercase(){anyhow::bail!("当前病毒库包与指针哈希不符");}
         let manifest:Manifest=serde_json::from_slice(&fs::read(directory.join("rules.manifest.json"))?).context("当前病毒库清单无效")?;
         return Ok(Some((bytes,manifest)));
     }
@@ -87,7 +87,7 @@ fn install_verified_package(bytes:&[u8],manifest:&Manifest)->Result<()> {
 }
 fn install_verified_package_at(root:&Path,bytes:&[u8],manifest:&Manifest)->Result<()> {
     verified_rules_from_package(bytes,manifest)?;
-    let digest=hex::encode(Sha256::digest(bytes));
+    let digest=hex::encode(sha256(bytes));
     let directory=root.join("versions").join(&digest);fs::create_dir_all(&directory)?;
     let package_path=directory.join("rules.package.zip");let manifest_path=directory.join("rules.manifest.json");
     let manifest_bytes=serde_json::to_vec(manifest)?;
@@ -169,7 +169,7 @@ pub fn verify_engine_bytes(bytes:&[u8],expected_version:&str)->Result<()> {
     let version_start=124+product_len;let version=std::str::from_utf8(&payload[version_start..version_start+version_len]).context("算法 DLL 版本无效")?;
     let platform_start=version_start+version_len;let platform=std::str::from_utf8(&payload[platform_start..]).context("算法 DLL 平台标识无效")?;
     if product!=ENGINE_PRODUCT||version!=expected_version||platform!=ENGINE_PLATFORM{anyhow::bail!("算法 DLL 不属于本项目、版本或平台");}
-    if Sha256::digest(&bytes[..start]).as_slice()!=digest{anyhow::bail!("算法 DLL 主体已被篡改");}
+    if sha256(&bytes[..start]).as_slice()!=digest{anyhow::bail!("算法 DLL 主体已被篡改");}
     let signed=engine_identity_message(product,version,platform,abi,body_len,digest);
     let key=hex::decode(RULE_PUBLIC_KEY_HEX.trim()).context("生产规则公钥无效")?;
     if key.len()!=32{anyhow::bail!("未配置有效的生产规则公钥");}
@@ -178,7 +178,7 @@ pub fn verify_engine_bytes(bytes:&[u8],expected_version:&str)->Result<()> {
 
 pub fn verify_rule_package_bytes(bytes:&[u8], expected:&str, signature_b64:&str, algorithm:&str)->Result<()> {
     if algorithm!="Ed25519" { anyhow::bail!("不支持的规则签名算法"); }
-    let digest=Sha256::digest(bytes);
+    let digest=sha256(bytes);
     if hex::encode(digest)!=expected.to_ascii_lowercase(){anyhow::bail!("规则包哈希不匹配");}
     let sig=STANDARD.decode(signature_b64).context("规则包签名编码无效")?;
     let key=hex::decode(RULE_PUBLIC_KEY_HEX.trim()).context("生产规则公钥无效")?;

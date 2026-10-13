@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"] mod cloud;
 use anyhow::Context;
-use sha2::Digest;
+use crate::hash::sha256;
+mod hash;
 mod engine_host;
 mod github_icon;
 mod gpu_scan;
@@ -100,7 +101,7 @@ const ID_SETTINGS_CHANNEL: usize = 362;
 const ID_SETTINGS_ACCESSIBILITY: usize = 363;
 const ID_SETTINGS_INPUT_PROTECTION:usize=364;
 const ID_FINDING_FIRST: usize = 0x0100_0000;
-const CLIENT_VERSION:&str="2026.10.13.1";
+const CLIENT_VERSION:&str="2026.10.14.1";
 const MAIN_WINDOW_STYLE:u32=WS_OVERLAPPED|WS_CAPTION|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;
 // The only terminal page in the scan/remediation flow. It is entered by the
 // remediation worker after all selected items have been processed, never by a
@@ -674,7 +675,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 audit::record("startup_error",error);
                 // Show the error before WM_DESTROY posts WM_QUIT, which can end
                 // the message box's modal loop before the user sees it.
-                prompt_box::message_box_w(hwnd,wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}\r\n\r\n系统日期、时间不正确也会导致 HTTPS 证书验证失败，请检查并校准系统时间后重试。")).as_ptr(),wide("更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
+                prompt_box::MessageBoxNew(hwnd,wide(&format!("系统联网正常，但无法连接更新服务器，程序已停止启动。\r\n\r\n{error}\r\n\r\n系统日期、时间不正确也会导致 HTTPS 证书验证失败，请检查并校准系统时间后重试。")).as_ptr(),wide("更新连接失败").as_ptr(),MB_OK|MB_ICONERROR);
                 state().allow_close.store(true,Ordering::SeqCst);
                 DestroyWindow(hwnd);
             }
@@ -718,7 +719,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_AUTOMATION_WARNING=>{
             if input_guard::take_internal(hwnd,msg,w,l).is_none()||!input_guard::auto_prompt_pending(){return 0;}
             if IsWindowEnabled(hwnd)==0{input_guard::finish_auto_prompt(false);return 0;}
-            let result=prompt_box::named(hwnd,"刚才有一次操作未通过输入校验，已被拦截。\r\n\r\n此保护用于阻止其他程序模拟点击、按键或调用自动化接口，防止恶意软件停止扫描、修改设置或关闭本程序。\r\n\r\n如果你正在使用可信的远程桌面、辅助工具或自动化工具操作本程序，可以选择“关闭本次保护”。如果你正在本机用鼠标、键盘操作，请选择“保持保护”。\r\n\r\n关闭保护后，其他程序（包括恶意软件）也可能模拟操作，停止扫描、更改设置或关闭本程序。请仅在确认需要时关闭。\r\n\r\n“关闭本次保护”仅在本次运行内有效，设置项仍为“自动”，下次启动将恢复保护。\r\n选择“保持保护”后，本次运行不再提示。","控件保护",MB_OKCANCEL|MB_ICONWARNING|MB_SETFOREGROUND|MB_DEFBUTTON2|prompt_box::PROTECT|prompt_box::unprotected_button(IDYES),&[(IDYES,"关闭本次保护"),(IDCANCEL,"保持保护")]);
+            let result=prompt_box::named(hwnd,"刚才有一次操作未通过输入校验，已被拦截。\r\n\r\n此保护用于阻止其他程序模拟点击、按键或调用自动化接口，防止恶意软件停止扫描、修改设置或关闭本程序。\r\n\r\n如果你正在使用可信的远程桌面、辅助工具或自动化工具操作本程序，可以选择“关闭本次保护”。如果你正在本机用鼠标、键盘操作，请选择“保持保护”。\r\n\r\n关闭保护后，其他程序（包括恶意软件）也可能模拟操作，停止扫描、更改设置或关闭本程序。请仅在确认需要时关闭。\r\n\r\n“关闭本次保护”仅在本次运行内有效，设置项仍为“自动”，下次启动将恢复保护。\r\n选择“保持保护”后，本次运行不再提示。","控件保护",MB_OKCANCEL|MB_ICONWARNING|MB_SETFOREGROUND|MB_DEFBUTTON2|prompt_box::PROTECT|prompt_box::unprotected_button(IDCANCEL),&[(IDYES,"关闭本次保护"),(IDCANCEL,"保持保护")]);
             input_guard::finish_auto_prompt(result==IDYES);audit::record("protection",if result==IDYES{"用户选择关闭本次运行的控件保护"}else{"保留控件保护，本次运行不再询问"});0
         }
         WM_SIZE => {
@@ -931,7 +932,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 , ID_DELETE_ALL => delete_all_quarantine(hwnd)
                 , ID_GITHUB => {
                     let result=ShellExecuteW(hwnd,wide("open").as_ptr(),wide("https://github.com/EPLCX/SilverFox-Rescue").as_ptr(),null(),null(),SW_SHOWNORMAL);
-                    if (result as isize)<=32{prompt_box::message_box_w(hwnd,wide("打开默认浏览器失败，请访问 https://github.com/EPLCX/SilverFox-Rescue").as_ptr(),wide("打开 GitHub 失败").as_ptr(),MB_OK|MB_ICONERROR);}
+                    if (result as isize)<=32{prompt_box::MessageBoxNew(hwnd,wide("打开默认浏览器失败，请访问 https://github.com/EPLCX/SilverFox-Rescue").as_ptr(),wide("打开 GitHub 失败").as_ptr(),MB_OK|MB_ICONERROR);}
                 }
                 , ID_MINIMIZE => {input_guard::send_system_command(hwnd,SC_MINIMIZE as usize);}
                 , ID_CLOSE => {} // A synthetic WM_COMMAND is not an authorized close action.
@@ -2139,7 +2140,7 @@ unsafe fn client_height(hwnd:HWND)->i32{let mut rect:RECT=std::mem::zeroed();Get
 fn claim_work() -> bool {
     if FORCED_UPDATE.load(Ordering::Acquire) {
         let (_,version,status)=program_update_state();
-        unsafe{prompt_box::message_box_w(null_mut(),wide(&format!("服务器要求先完成强制程序更新 {}。\r\n\r\n当前状态：{}\r\n\r\n请在“程序更新”页面查看进度。",version,status)).as_ptr(),wide("强制更新").as_ptr(),MB_OK|MB_ICONWARNING);}
+        unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("服务器要求先完成强制程序更新 {}。\r\n\r\n当前状态：{}\r\n\r\n请在“程序更新”页面查看进度。",version,status)).as_ptr(),wide("强制更新").as_ptr(),MB_OK|MB_ICONWARNING);}
         return false;
     }
     state().working.compare_exchange(false, true, Ordering:: SeqCst, Ordering:: SeqCst).is_ok()
@@ -2532,7 +2533,7 @@ unsafe fn remediate(hwnd:HWND){
     drop(findings);
     let count=candidates.len();
     if count==0{
-        prompt_box::message_box_w(hwnd,wide("请先选择要处理的项目。").as_ptr(),wide("扫描结果").as_ptr(),MB_OK|MB_ICONINFORMATION);
+        prompt_box::MessageBoxNew(hwnd,wide("请先选择要处理的项目。").as_ptr(),wide("扫描结果").as_ptr(),MB_OK|MB_ICONINFORMATION);
         return;
     }
     if !claim_work(){return;}
@@ -2737,10 +2738,10 @@ unsafe fn restore_selected(hwnd:HWND){
     let selected=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner()).selected.map(|i|i as i32).unwrap_or(-1);
     // Row 0 is the loading line and row 1 is the list header.  Only rows from
     // 2 onward map to a cached quarantine record.
-    if selected<2{prompt_box::message_box_w(hwnd,wide("请先选择一个实际的隔离项目。").as_ptr(),wide("隔离区").as_ptr(),MB_OK|MB_ICONINFORMATION);return;}
-    let Some(record)=state().quarantine_records.lock().unwrap_or_else(|error|error.into_inner()).get((selected-2)as usize).cloned()else{prompt_box::message_box_w(hwnd,wide("隔离记录尚未加载完成，请稍后再试。").as_ptr(),wide("隔离区").as_ptr(),MB_OK|MB_ICONINFORMATION);return;};
+    if selected<2{prompt_box::MessageBoxNew(hwnd,wide("请先选择一个实际的隔离项目。").as_ptr(),wide("隔离区").as_ptr(),MB_OK|MB_ICONINFORMATION);return;}
+    let Some(record)=state().quarantine_records.lock().unwrap_or_else(|error|error.into_inner()).get((selected-2)as usize).cloned()else{prompt_box::MessageBoxNew(hwnd,wide("隔离记录尚未加载完成，请稍后再试。").as_ptr(),wide("隔离区").as_ptr(),MB_OK|MB_ICONINFORMATION);return;};
     let question=wide(&format!("恢复 {} 到原位置？",record.original_path.display()));
-    if prompt_box::message_box_w(hwnd,question.as_ptr(),wide("确认恢复").as_ptr(),MB_YESNO|MB_ICONQUESTION)!=IDYES{return;}
+    if prompt_box::MessageBoxNew(hwnd,question.as_ptr(),wide("确认恢复").as_ptr(),MB_YESNO|MB_ICONQUESTION)!=IDYES{return;}
     let generation=state().page_generation.load(Ordering::Acquire);
     audit::record("restore",&format!("开始恢复 {}，记录 {}",record.original_path.display(),record.id));
     add_page_line("正在恢复所选文件…");
@@ -2753,7 +2754,7 @@ unsafe fn restore_selected(hwnd:HWND){
 unsafe fn delete_all_quarantine(hwnd:HWND){
     let count=state().quarantine_records.lock().unwrap_or_else(|error|error.into_inner()).len();
     let question=wide(&format!("永久删除隔离区中的全部项目（当前显示 {} 项）？此操作无法撤销。若有原文件等待重启后删除，该计划不会取消。",count));
-    if prompt_box::message_box_w(hwnd,question.as_ptr(),wide("确认清空隔离区").as_ptr(),MB_YESNO|MB_ICONWARNING)!=IDYES{return;}
+    if prompt_box::MessageBoxNew(hwnd,question.as_ptr(),wide("确认清空隔离区").as_ptr(),MB_YESNO|MB_ICONWARNING)!=IDYES{return;}
     let generation=state().page_generation.load(Ordering::Acquire);
     audit::record("quarantine_delete",&format!("用户确认清空隔离区，当前 {} 项",count));
     add_page_line("正在删除隔离区项目…");
@@ -3016,7 +3017,7 @@ fn program_update_available(manifest:&cloud::ProgramManifest)->bool{
     let Some(expected)=manifest.executable_sha256.as_deref() else{return false};
     let Ok(path)=std::env::current_exe() else{return false};
     let Ok(bytes)=fs::read(path) else{return false};
-    hex::encode(sha2::Sha256::digest(&bytes))!=expected.to_ascii_lowercase()
+    hex::encode(sha256(&bytes))!=expected.to_ascii_lowercase()
 }
 
 fn check_program_update_on_startup(hwnd:HWND) {
@@ -3080,7 +3081,7 @@ fn ensure_elevated() -> bool {
         }
         // A failed UAC handoff must not silently run scanning as a standard user.
         if std::env::args().any(|arg|arg=="--reload") {
-            prompt_box::message_box_w(null_mut(),wide("管理员提权未生效，程序已停止启动。").as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);
+            prompt_box::MessageBoxNew(null_mut(),wide("管理员提权未生效，程序已停止启动。").as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);
             return false;
         }
         let exe = match std:: env:: current_exe() {
@@ -3093,7 +3094,7 @@ fn ensure_elevated() -> bool {
         // A successful UAC relaunch releases the global mutex in this process.
         // A failed request exits instead of loading the DLL without Administrator rights.
         if (result as isize) <= 32 {
-            prompt_box::message_box_w(null_mut(),wide("需要管理员权限才能启动扫描。").as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);
+            prompt_box::MessageBoxNew(null_mut(),wide("需要管理员权限才能启动扫描。").as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);
         }
         false
     }
@@ -3154,15 +3155,15 @@ fn main() {
         return;
     }
     if let Err(error)=audit::initialize(){
-        unsafe{prompt_box::message_box_w(null_mut(),wide(&format!("审计日志初始化失败：{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("审计日志初始化失败：{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         return;
     }
     if let Err(error)=updater::embedded_engine(){
-        unsafe{prompt_box::message_box_w(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         std::process::exit(3);
     }
     if let Err(error)=scanner::Scanner::load(){
-        unsafe{prompt_box::message_box_w(null_mut(),wide(&format!("算法 DLL 缺失或验证/加载失败，程序已阻止启动：\r\n{error}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("算法 DLL 缺失或验证/加载失败，程序已阻止启动：\r\n{error}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         std::process::exit(3);
     }
     let user_mode_protection = protection:: enable_user_mode_protection();

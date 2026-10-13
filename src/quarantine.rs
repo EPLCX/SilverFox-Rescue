@@ -1,7 +1,7 @@
 use crate::model::Finding;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use crate::hash::sha256;
 use aes::Aes256;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -13,7 +13,7 @@ pub struct QuarantineRecord { pub id: String, pub original_path: PathBuf, pub st
 
 const MAGIC:&[u8;8]=b"SFXQENC1";
 type Cipher=ctr::Ctr128BE<Aes256>;
-fn key()->[u8;32]{Sha256::digest(b"SilverFoxRescue quarantine format v1 fixed local key").into()}
+fn key()->[u8;32]{sha256(b"SilverFoxRescue quarantine format v1 fixed local key")}
 
 fn encrypt_file(source:&Path,destination:&Path,expected_digest:&str)->Result<()> {
     let mut nonce=[0u8;16];SystemRandom::new().fill(&mut nonce).map_err(|_|anyhow::anyhow!("隔离区随机数生成失败"))?;
@@ -21,10 +21,10 @@ fn encrypt_file(source:&Path,destination:&Path,expected_digest:&str)->Result<()>
     let mut input=fs::File::open(source)?;
     let mut output=fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
     output.write_all(MAGIC)?;output.write_all(&nonce)?;
-    let mut buffer=[0u8;65536];let mut hash=Sha256::new();
+    let mut buffer=[0u8;65536];let mut hash=ring::digest::Context::new(&ring::digest::SHA256);
     loop{let n=input.read(&mut buffer)?;if n==0{break;}hash.update(&buffer[..n]);cipher.apply_keystream(&mut buffer[..n]);output.write_all(&buffer[..n])?;}
     output.sync_all()?;
-    if hex::encode(hash.finalize())!=expected_digest{anyhow::bail!("文件在加密期间已变化，原文件未删除");}
+    if hex::encode(hash.finish().as_ref())!=expected_digest{anyhow::bail!("文件在加密期间已变化，原文件未删除");}
     Ok(())
 }
 
@@ -35,7 +35,7 @@ fn decrypt_file(source:&Path,destination:&Path,expected_digest:&str)->Result<()>
     let mut nonce=[0u8;16];nonce.copy_from_slice(&header[8..]);
     let mut cipher=Cipher::new(&key().into(),&nonce.into());
     let mut output=fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
-    let result=(||->Result<()>{let mut hash=Sha256::new();let mut buffer=[0u8;65536];loop{let n=input.read(&mut buffer)?;if n==0{break;}cipher.apply_keystream(&mut buffer[..n]);hash.update(&buffer[..n]);output.write_all(&buffer[..n])?;}output.sync_all()?;if hex::encode(hash.finalize())!=expected_digest{anyhow::bail!("隔离文件校验失败，拒绝恢复");}Ok(())})();
+    let result=(||->Result<()>{let mut hash=ring::digest::Context::new(&ring::digest::SHA256);let mut buffer=[0u8;65536];loop{let n=input.read(&mut buffer)?;if n==0{break;}cipher.apply_keystream(&mut buffer[..n]);hash.update(&buffer[..n]);output.write_all(&buffer[..n])?;}output.sync_all()?;if hex::encode(hash.finish().as_ref())!=expected_digest{anyhow::bail!("隔离文件校验失败，拒绝恢复");}Ok(())})();
     if result.is_err(){drop(output);let _=fs::remove_file(destination);}result
 }
 
@@ -84,10 +84,10 @@ where F:FnMut(usize,&anyhow::Error){
     let repair=repair_file_access(&finding.path);
     crate::audit::record("file_access_repair",&format!("{}：{}",finding.path.display(),repair));
     let mut file = fs::File::open(&finding.path).context("处置前无法重新打开文件")?;
-    let mut current = Sha256::new();
+    let mut current = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buffer = [0u8; 64 * 1024];
     loop { let n = file.read(&mut buffer)?; if n == 0 { break; } current.update(&buffer[..n]); }
-    if hex::encode(current.finalize()) != digest { anyhow::bail!("文件在扫描后已变化，拒绝处置；请重新扫描"); }
+    if hex::encode(current.finish().as_ref()) != digest { anyhow::bail!("文件在扫描后已变化，拒绝处置；请重新扫描"); }
     drop(file);
     if digest.len()<12{anyhow::bail!("文件哈希格式错误");}
     let id = format!("{}-{}", SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(), &digest[..12]);
@@ -294,7 +294,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let source=dir.join("source.exe");let stored=dir.join("payload.enc");let restored=dir.join("restored.exe");
         let content=b"MZ test executable content";
-        fs::write(&source,content).unwrap();let digest=hex::encode(Sha256::digest(content));
+        fs::write(&source,content).unwrap();let digest=hex::encode(sha256(content));
         encrypt_file(&source,&stored,&digest).unwrap();
         let bytes=fs::read(&stored).unwrap();assert_eq!(&bytes[..8],MAGIC);assert_ne!(&bytes[..2],b"MZ");
         decrypt_file(&stored,&restored,&digest).unwrap();assert_eq!(fs::read(&restored).unwrap(),content);

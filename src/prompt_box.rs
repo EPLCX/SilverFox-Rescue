@@ -96,7 +96,8 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
     if crate::input_guard::is_control_input(msg)&&!physical_input{
         let x=l as i16 as i32;let y=(l>>16)as i16 as i32;
         let exempt=matches!(msg,WM_LBUTTONDOWN|WM_LBUTTONUP)&&dialog.buttons.iter().enumerate().any(|(index,button)|inside(&button.rect,x,y)&&!protected(dialog,index))
-            ||matches!(msg,WM_KEYDOWN|WM_SYSKEYDOWN)&&matches!(w as u16,VK_RETURN|VK_SPACE)&&!protected(dialog,dialog.focus.get());
+            ||matches!(msg,WM_KEYDOWN|WM_SYSKEYDOWN)&&matches!(w as u16,VK_RETURN|VK_SPACE)&&!protected(dialog,dialog.focus.get())
+            ||msg==WM_KEYDOWN&&w==VK_ESCAPE as usize&&dialog.buttons.iter().enumerate().any(|(index,button)|Some(button.id)==dialog.close_result&&!protected(dialog,index));
         if !exempt{
             if msg==WM_LBUTTONUP{ReleaseCapture();if let Some(index)=dialog.pressed.replace(None){invalidate_control(hwnd,dialog,index);}}
             crate::record_blocked_control();return 0;
@@ -214,10 +215,10 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             if dialog.focus.get()==dialog.buttons.len()&&matches!(w as u16,VK_UP|VK_DOWN){scroll_text(hwnd,dialog,if w==VK_UP as usize{-36}else{36});return 0;}
             let cancel=w==VK_ESCAPE as usize;
             if cancel||w==VK_RETURN as usize||w==VK_SPACE as usize{
-                let index=if dialog.focus.get()==dialog.buttons.len(){dialog.default}else{dialog.focus.get()};
-                let guarded=if cancel{dialog.flags&PROTECT!=0}else{protected(dialog,index)};
+                let index=if cancel{dialog.buttons.iter().position(|button|Some(button.id)==dialog.close_result).unwrap_or(dialog.buttons.len()+1)}else if dialog.focus.get()==dialog.buttons.len(){dialog.default}else{dialog.focus.get()};
+                let guarded=protected(dialog,index);
                 if guarded&&!physical_input{crate::record_blocked_control();return 0;}
-                if cancel{activate_control(hwnd,dialog,dialog.buttons.len()+1,physical_input);}else{activate_control(hwnd,dialog,index,physical_input);}
+                activate_control(hwnd,dialog,index,physical_input);
             }0
         }
         WM_COMMAND=>{
@@ -238,7 +239,8 @@ unsafe extern "system" fn disable_task_window(hwnd:HWND,l:LPARAM)->BOOL{
     if IsWindowEnabled(hwnd)!=0{EnableWindow(hwnd,0);(*(l as *mut Vec<HWND>)).push(hwnd);}1
 }
 /// Same parameters and ID* return values as Win32 MessageBoxW; PROTECT defaults off.
-pub unsafe fn message_box_w(owner:HWND,text:*const u16,caption:*const u16,flags:u32)->i32{
+#[allow(non_snake_case)]
+pub unsafe fn MessageBoxNew(owner:HWND,text:*const u16,caption:*const u16,flags:u32)->i32{
     show(owner,copy_text(text,""),copy_text(caption,"提示"),flags,button_specs(flags))
 }
 pub unsafe fn named(owner:HWND,text:&str,caption:&str,flags:u32,buttons:&[(i32,&str)])->i32{
@@ -272,14 +274,48 @@ unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs
     static REGISTER:Once=Once::new();let class=wide("SilverFoxMessageBoxWindow");let instance=GetModuleHandleW(null());
     REGISTER.call_once(||{let wc=WNDCLASSW{lpfnWndProc:Some(wndproc),hInstance:instance,lpszClassName:class.as_ptr(),hCursor:LoadCursorW(null_mut(),IDC_ARROW),hbrBackground:(COLOR_WINDOW+1)as HBRUSH,..std::mem::zeroed()};RegisterClassW(&wc);});
     let dpi=if owner.is_null(){crate::dpi::system_dpi()}else{crate::dpi::window_dpi(owner)}.max(96)as i32;let s=|n:i32|n*dpi/96;
-    let width=s(620);let mut measured=RECT{left:0,top:0,right:s(520),bottom:0};let dc=GetDC(owner);let font=crate::paint_cache::font(-s(13));let previous=SelectObject(dc,font);
-    DrawTextW(dc,text.as_ptr(),-1,&mut measured,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);SelectObject(dc,previous);ReleaseDC(owner,dc);
-    let height=(measured.bottom+s(170)).clamp(s(230),GetSystemMetrics(SM_CYSCREEN).max(s(250))-s(50));
-    let gap=s(12);let button_width=s(130).min((width-s(48)-(specs.len()as i32-1)*gap)/specs.len()as i32);let start=(width-(specs.len()as i32*button_width+(specs.len()as i32-1)*gap))/2;
+    // Size against the owner's monitor work area, excluding the taskbar.
+    let mut anchor:RECT=std::mem::zeroed();
+    let monitor=if !owner.is_null()&&GetWindowRect(owner,&mut anchor)!=0{
+        MonitorFromWindow(owner,MONITOR_DEFAULTTONEAREST)
+    }else{
+        let mut cursor:POINT=std::mem::zeroed();GetCursorPos(&mut cursor);
+        anchor=RECT{left:cursor.x,top:cursor.y,right:cursor.x,bottom:cursor.y};
+        MonitorFromPoint(cursor,MONITOR_DEFAULTTONEAREST)
+    };
+    let mut info:MONITORINFO=std::mem::zeroed();info.cbSize=std::mem::size_of::<MONITORINFO>()as u32;
+    let work=if GetMonitorInfoW(monitor,&mut info)!=0{info.rcWork}else{RECT{left:0,top:0,right:GetSystemMetrics(SM_CXSCREEN),bottom:GetSystemMetrics(SM_CYSCREEN)}};
+    let max_width=(work.right-work.left-s(32)).max(1);
+    let max_height=(work.bottom-work.top-s(32)).max(1);
+    let dc=GetDC(owner);let previous=SelectObject(dc,crate::paint_cache::font(-s(12)));
+    let mut label_width=0;
+    for (_,label) in &specs{
+        let mut label_rect:RECT=std::mem::zeroed();
+        DrawTextW(dc,wide(label).as_ptr(),-1,&mut label_rect,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
+        label_width=label_width.max(label_rect.right);
+    }
+    let mut title_size:RECT=std::mem::zeroed();
+    DrawTextW(dc,title.as_ptr(),-1,&mut title_size,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
+    let gap=s(12);let count=specs.len()as i32;
+    let desired_button_width=(label_width+s(32)).max(s(90));
+    let button_row=count*desired_button_width+(count-1)*gap+s(48);
+    SelectObject(dc,crate::paint_cache::font(-s(13)));
+    let text_left=if flags&0xf0!=0{s(72)}else{s(24)};
+    let padding=text_left+s(24);
+    let mut natural:RECT=std::mem::zeroed();
+    DrawTextW(dc,text.as_ptr(),-1,&mut natural,DT_CALCRECT|DT_NOPREFIX);
+    let width=(natural.right+padding).max(button_row).max(title_size.right+s(76)).max(s(300)).min(s(620)).min(max_width);
+    let mut measured=RECT{left:0,top:0,right:(width-padding).max(1),bottom:0};
+    DrawTextW(dc,text.as_ptr(),-1,&mut measured,DT_CALCRECT|DT_WORDBREAK|DT_NOPREFIX);
+    SelectObject(dc,previous);ReleaseDC(owner,dc);
+    let height=(measured.bottom+s(170)).max(s(230)).min(max_height);
+    let button_width=desired_button_width.min(((width-s(48)-(count-1)*gap)/count).max(1));
+    let start=(width-(count*button_width+(count-1)*gap))/2;
     let buttons:Vec<Button>=specs.into_iter().enumerate().map(|(index,(id,label))|Button{id,label:wide(&label),rect:RECT{left:start+index as i32*(button_width+gap),top:height-s(65),right:start+index as i32*(button_width+gap)+button_width,bottom:height-s(25)}}).collect();
     let close_result=if buttons.iter().any(|button|button.id==IDCANCEL){Some(IDCANCEL)}else if flags&0xf==MB_OK{Some(IDOK)}else{None};
-    let default=((flags>>8)&3)as usize;let dialog=Box::new(Dialog{icon:load_prompt_icon(flags),owner,text,title,flags,focus:Cell::new(default.min(buttons.len()-1)),last_announced:Cell::new(None),focus_pending:Cell::new(false),default:default.min(buttons.len()-1),hot:Cell::new(None),keyboard:Cell::new(true),pressed:Cell::new(None),result:Cell::new(None),close_result,close_rect:RECT{left:width-s(48),top:0,right:width,bottom:s(40)},text_rect:RECT{left:if flags&0xf0!=0{s(72)}else{s(24)},top:s(65),right:width-s(24),bottom:height-s(90)},text_height:measured.bottom,scroll:Cell::new(0),buttons});
-    let mut owner_rect:RECT=std::mem::zeroed();let (x,y)=if !owner.is_null()&&GetWindowRect(owner,&mut owner_rect)!=0{((owner_rect.left+owner_rect.right-width)/2,(owner_rect.top+owner_rect.bottom-height)/2)}else{((GetSystemMetrics(SM_CXSCREEN)-width)/2,(GetSystemMetrics(SM_CYSCREEN)-height)/2)};
+    let default=((flags>>8)&3)as usize;let dialog=Box::new(Dialog{icon:load_prompt_icon(flags),owner,text,title,flags,focus:Cell::new(default.min(buttons.len()-1)),last_announced:Cell::new(None),focus_pending:Cell::new(false),default:default.min(buttons.len()-1),hot:Cell::new(None),keyboard:Cell::new(true),pressed:Cell::new(None),result:Cell::new(None),close_result,close_rect:RECT{left:width-s(48),top:0,right:width,bottom:s(40)},text_rect:RECT{left:text_left,top:s(65),right:width-s(24),bottom:height-s(90)},text_height:measured.bottom,scroll:Cell::new(0),buttons});
+    let x=((anchor.left+anchor.right-width)/2).clamp(work.left,(work.right-width).max(work.left));
+    let y=((anchor.top+anchor.bottom-height)/2).clamp(work.top,(work.bottom-height).max(work.top));
     let extended=if flags&(MB_SYSTEMMODAL|MB_TOPMOST)!=0{WS_EX_TOPMOST}else{0};
     let hwnd=CreateWindowExW(extended,class.as_ptr(),dialog.title.as_ptr(),crate::MAIN_WINDOW_STYLE,x,y,width,height,owner,null_mut(),instance,&*dialog as *const Dialog as *const _);
     if hwnd.is_null(){return 0;}
@@ -287,6 +323,7 @@ unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs
     let menu=GetSystemMenu(hwnd,0);if !menu.is_null(){DeleteMenu(menu,SC_MINIMIZE,MF_BYCOMMAND);DeleteMenu(menu,SC_MAXIMIZE,MF_BYCOMMAND);DeleteMenu(menu,SC_SIZE,MF_BYCOMMAND);}
     SetWindowPos(hwnd,null_mut(),0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);
     ShowWindow(hwnd,SW_SHOW);crate::configure_custom_frame(hwnd);SetActiveWindow(hwnd);SetForegroundWindow(hwnd);SetFocus(hwnd);UpdateWindow(hwnd);
+    windows_sys::Win32::System::Diagnostics::Debug::MessageBeep(flags&0xf0);
     let mut native_frame=0i32;
     let frame_result=windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(hwnd,windows_sys::Win32::Graphics::Dwm::DWMWA_NCRENDERING_ENABLED as u32,(&mut native_frame as *mut i32).cast(),std::mem::size_of::<i32>()as u32);
     crate::audit::record("prompt_window",&format!("提示框就绪：hwnd={:#x}，线程={}，DWM 非客户区={}，查询结果={frame_result:#x}，焦点控件={}",hwnd as usize,GetCurrentThreadId(),native_frame,focus_id(&dialog,dialog.focus.get())));

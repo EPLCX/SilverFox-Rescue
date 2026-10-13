@@ -11,12 +11,11 @@ hex = "0.4"
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 walkdir = "2"
 quick-xml = "0.30"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-msi = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
+cfb = "0.14"
 cab = "0.6"
 aes = "0.8"
 ctr = "0.9"
@@ -62,13 +61,12 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 ring = "0.17"
-sha2 = "0.10"
 serde_json = "1"
 hex = "0.4"
 base64 = "0.22"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"

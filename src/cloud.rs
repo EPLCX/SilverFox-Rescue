@@ -1,7 +1,7 @@
 //! Read-only client for the update website.
 use anyhow::{Context,Result};
 use serde::{Deserialize,Serialize};
-use sha2::Digest;
+use crate::hash::sha256;
 use ring::rand::{SecureRandom,SystemRandom};
 use std::{fs,io::Read,sync::OnceLock,time::Duration};
 
@@ -124,7 +124,7 @@ impl CloudClient{
         let mut bytes=Vec::new();reader.take(256*1024*1024).read_to_end(&mut bytes).context("读取程序更新包失败")?;
         if bytes.len()==256*1024*1024{anyhow::bail!("程序更新包超过 256 MiB");}
         let expected=manifest.sha256.as_deref().context("程序更新清单缺少哈希")?;
-        if hex::encode(sha2::Sha256::digest(&bytes))!=expected.to_ascii_lowercase(){anyhow::bail!("程序更新包哈希不匹配");}
+        if hex::encode(sha256(&bytes))!=expected.to_ascii_lowercase(){anyhow::bail!("程序更新包哈希不匹配");}
         if let Some(parent)=destination.parent(){fs::create_dir_all(parent)?;}
         let pending=destination.with_extension("pending");fs::write(&pending,&bytes)?;
         if destination.exists(){fs::remove_file(destination).ok();}fs::rename(&pending,destination)?;Ok(())

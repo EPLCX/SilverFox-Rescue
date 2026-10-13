@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use ring::signature::{UnparsedPublicKey, ED25519};
-use sha2::{Digest, Sha256};
 
 const SECTION_NAME: &[u8; 8] = b".sfsig\0\0";
 const MAGIC: &[u8; 8] = b"SFXSIG01";
@@ -47,14 +46,14 @@ pub(crate) fn signature_offset(bytes: &[u8]) -> Result<Option<usize>> {
 }
 
 fn signed_message(bytes: &[u8], offset: usize, domain: &[u8]) -> Vec<u8> {
-    let mut hash = Sha256::new();
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
     hash.update(&bytes[..offset]);
-    hash.update([0u8; SLOT_SIZE]);
+    hash.update(&[0u8; SLOT_SIZE]);
     hash.update(&bytes[offset + SLOT_SIZE..]);
     let mut message = Vec::with_capacity(domain.len() + 8 + 32);
     message.extend_from_slice(domain);
     message.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    message.extend_from_slice(&hash.finalize());
+    message.extend_from_slice(hash.finish().as_ref());
     message
 }
 

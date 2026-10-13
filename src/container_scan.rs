@@ -73,15 +73,64 @@ fn drain<R: Read>(reader: &mut R, mut bytes: u64, cancelled: Option<&AtomicBool>
     Ok(true)
 }
 
+// MSI packs pairs of characters from this alphabet into CFB stream names.
+fn msi_stream_name(encoded: &str) -> Option<String> {
+    if encoded.starts_with('\u{4840}') || matches!(encoded,
+        "\u{5}DigitalSignature" | "\u{5}MsiDigitalSignatureEx" |
+        "\u{5}SummaryInformation" | "\u{5}DocumentSummaryInformation") {
+        return None;
+    }
+    const ALPHABET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._";
+    let mut name = String::new();
+    for chr in encoded.chars() {
+        match chr as u32 {
+            value @ 0x3800..=0x47ff => {
+                let pair = value - 0x3800;
+                name.push(ALPHABET[(pair & 63) as usize] as char);
+                name.push(ALPHABET[(pair >> 6) as usize] as char);
+            }
+            value @ 0x4800..=0x483f => name.push(ALPHABET[(value - 0x4800) as usize] as char),
+            _ => name.push(chr),
+        }
+    }
+    Some(name)
+}
+
+fn msi_clsid(clsid: u128) -> bool {
+    // Installer, patch and transform package types.
+    matches!(clsid,
+        0x000c1084_0000_0000_c000_000000000046 |
+        0x000c1086_0000_0000_c000_000000000046 |
+        0x000c1082_0000_0000_c000_000000000046)
+}
+
+pub fn probe_msi<R: Read + Seek>(reader: R) -> std::io::Result<bool> {
+    let package = cfb::CompoundFile::open(reader)?;
+    Ok(msi_clsid(package.root_entry().clsid().as_u128()))
+}
+
 pub fn msi_cancellable<R: Read + Seek>(reader: R, cancelled: Option<&AtomicBool>) -> Result<Option<Members>> {
-    let mut package = msi::Package::open(reader).context("MSI 数据库损坏")?;
-    let names: Vec<_> = package.streams().take(MAX_MEMBERS + 1).collect();
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) { return Ok(None); }
+    let mut package = cfb::CompoundFile::open(reader).context("MSI 复合文件损坏")?;
+    if !msi_clsid(package.root_entry().clsid().as_u128()) {
+        anyhow::bail!("MSI 包类型无效");
+    }
+    let mut names = Vec::new();
+    for entry in package.read_root_storage() {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) { return Ok(None); }
+        if entry.is_stream() {
+            if let Some(name) = msi_stream_name(entry.name()) {
+                names.push((entry.path().to_path_buf(), name));
+                if names.len() > MAX_MEMBERS { break; }
+            }
+        }
+    }
     let mut out = Members::new();
     let mut total: u64 = 0;
     if names.len() > MAX_MEMBERS { out.skipped += names.len() - MAX_MEMBERS; }
-    for name in names.into_iter().take(MAX_MEMBERS) {
+    for (path, name) in names.into_iter().take(MAX_MEMBERS) {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) { return Ok(None); }
-        let mut stream = package.read_stream(&name).with_context(|| format!("MSI 数据流 {} 无法读取", name))?;
+        let mut stream = package.open_stream(&path).with_context(|| format!("MSI 数据流 {} 无法读取", name))?;
         let mut bytes = Vec::new();
         // CAB decoding needs random access. Bound and reserve its compressed
         // stream explicitly so allocation failure is reported, not fatal.

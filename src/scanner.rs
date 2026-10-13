@@ -1,7 +1,7 @@
 #![allow(dead_code)] // Signed-engine wrappers for optional scan modes.
 use crate::model::{Finding, ProcessFinding, Verdict};
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
+use crate::hash::sha256;
 use std::{collections::{HashMap, HashSet}, fs::{File, OpenOptions}, io::{Read, Seek, SeekFrom}, mem::size_of, os::windows::fs::OpenOptionsExt, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, TryLockError, OnceLock, atomic::{AtomicBool, AtomicUsize, Ordering}}, time::{Duration, Instant, SystemTime}};
 #[cfg(test)] use walkdir::WalkDir;
 use windows_sys::Win32::{Foundation::{CloseHandle,DuplicateHandle,FILETIME,HANDLE,INVALID_HANDLE_VALUE,DUPLICATE_SAME_ACCESS,WAIT_OBJECT_0},Security::{AdjustTokenPrivileges,LookupPrivilegeValueW,LUID_AND_ATTRIBUTES,SE_BACKUP_NAME,SE_PRIVILEGE_ENABLED,TOKEN_ADJUST_PRIVILEGES,TOKEN_PRIVILEGES,TOKEN_QUERY},Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_FLAG_SEQUENTIAL_SCAN,FILE_SHARE_DELETE,FILE_SHARE_READ,FILE_SHARE_WRITE},System::{Diagnostics::ToolHelp::{CreateToolhelp32Snapshot,Process32FirstW,Process32NextW,PROCESSENTRY32W,TH32CS_SNAPPROCESS},IO::CancelSynchronousIo,Threading::{CreateEventW,GetCurrentProcess,GetCurrentThread,GetProcessTimes,GetSystemTimes,OpenProcess,OpenProcessToken,ResetEvent,SetEvent,WaitForSingleObject,PROCESS_QUERY_LIMITED_INFORMATION}}};
@@ -75,7 +75,7 @@ impl Scanner {
         if bytes.len()>16*1024*1024{anyhow::bail!("配置文件在读取期间超过扫描上限");}
         let decision=self.engine.scan_configuration(&bytes,hosts)?;
         if decision.verdict==Verdict::Clean{return Ok(None);}
-        Ok(Some(Finding{path:path.into(),sha256:Some(hex::encode(Sha256::digest(&bytes))),verdict:decision.verdict,score:decision.score,evidence:decision.evidence,source:if hosts{"quick-hosts"}else{"quick-ci-policy"}.into()}))
+        Ok(Some(Finding{path:path.into(),sha256:Some(hex::encode(sha256(&bytes))),verdict:decision.verdict,score:decision.score,evidence:decision.evidence,source:if hosts{"quick-hosts"}else{"quick-ci-policy"}.into()}))
     }
 
     pub fn acceleration_status(&self) -> String { crate::gpu_scan::status() }
@@ -164,8 +164,8 @@ impl Scanner {
         let compound=magic[..magic_len].starts_with(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1");
         if compound&&meta.len()>MAX_FILE{anyhow::bail!("文件超过 256 MB 安全上限");}
         let is_msi=if compound{
-            match msi::Package::open(&mut f){
-                Ok(_)=>true,
+            match crate::container_scan::probe_msi(&mut f){
+                Ok(is_msi)=>is_msi,
                 Err(error) if matches!(error.kind(),std::io::ErrorKind::InvalidData|std::io::ErrorKind::InvalidInput)=>false,
                 Err(error)=>return Err(error.into()),
             }
@@ -183,7 +183,7 @@ impl Scanner {
             match lock_for_scan(&LARGE_SCAN_LOCK,cancelled){Some(guard)=>Some(guard),None=>return Ok(None)}
         }else{None};
         if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)){return Ok(None);}
-        let mut hash = Sha256::new();
+        let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
         let mut sample = Vec::new();
         let sample_limit=if is_zip||is_msi{ARCHIVE_HEADER_LIMIT}else{READ_LIMIT as usize};
         sample.try_reserve_exact((meta.len() as usize).min(sample_limit)).context("扫描内存不足")?;
@@ -205,7 +205,7 @@ impl Scanner {
         if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)) { return Ok(None); }
         // GPU histograms supply byte-frequency features to ML inference.
         let gpu_ml_histograms=crate::gpu_scan::ml_histograms(&sample);
-        let digest = hex::encode(hash.finalize());
+        let digest = hex::encode(hash.finish().as_ref());
         if cancelled.is_some_and(|flag|flag.load(Ordering::Acquire)) { return Ok(None); }
         if is_zip || is_msi {
             f.seek(SeekFrom::Start(0))?;

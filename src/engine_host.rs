@@ -1,7 +1,7 @@
 #![allow(dead_code)] // Signed DLL ABI adapters for optional scan paths.
 //! Host ABI for the signed, updateable algorithm DLL. No verdict logic lives here.
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
+use crate::hash::sha256;
 use std::{ffi::{c_char, CStr, CString}, fs, io::Write, path::{Path, PathBuf}, sync::atomic::{AtomicU64,Ordering}};
 use windows_sys::Win32::{Foundation::FreeLibrary,System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32}};
 
@@ -111,7 +111,7 @@ impl Engine {
             .context("算法 DLL 加载前签名校验失败")?;
         // File analysis runs in the elevated Administrator UI process.
         let root=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join("SilverFoxRescue").join("rules").join("engines");
-        let digest=hex::encode(Sha256::digest(bytes));
+        let digest=hex::encode(sha256(bytes));
         let dir=root.join(&digest);
         fs::create_dir_all(&dir).context("无法创建算法目录")?;
         let dll=dir.join("algorithms.dll");
@@ -127,7 +127,7 @@ impl Engine {
             }
         }
         let current=fs::read(&dll).context("无法读取算法 DLL")?;
-        if Sha256::digest(&current)!=Sha256::digest(bytes){anyhow::bail!("算法 DLL 文件被篡改，已阻止加载");}
+        if sha256(&current)!=sha256(bytes){anyhow::bail!("算法 DLL 文件被篡改，已阻止加载");}
         // The engine uses a static C++ runtime; imports must resolve only from System32.
         let module=unsafe{LoadLibraryExW(wide(&dll).as_ptr(),std::ptr::null_mut(),LOAD_LIBRARY_SEARCH_SYSTEM32)};
         if module.is_null(){anyhow::bail!("无法加载经过签名包验证的算法 DLL：{}",std::io::Error::last_os_error());}

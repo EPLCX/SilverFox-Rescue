@@ -38,8 +38,7 @@ def main():
     left = array(header, "LEFT", True)
     right = array(header, "RIGHT", True)
     feature = array(header, "FEATURES", True)
-    threshold = array(header, "THRESHOLDS")
-    leaves = array(header, "LEAF_VALUES")
+    node_values = array(header, "NODE_VALUES")
     class_count = int(re.search(r"CLASS_COUNT = (\d+);", header).group(1))
     slope = float(re.search(r"CALIBRATION_SLOPE = ([^;]+);", header).group(1))
     intercept = float(re.search(r"CALIBRATION_INTERCEPT = ([^;]+);", header).group(1))
@@ -111,8 +110,8 @@ def main():
             node = 0
             while feature[base+node] >= 0:
                 at = base+node
-                node = left[at] if x[feature[at]] <= threshold[at] else right[at]
-            margins[tree % class_count] += leaves[base+node]
+                node = left[at] if x[feature[at]] <= node_values[at] else right[at]
+            margins[tree % class_count] += node_values[base+node]
         largest = max(margins)
         exp_values = [math.exp(value-largest) for value in margins]
         raw = min(1-1e-7, max(1e-7, 1-exp_values[0]/sum(exp_values)))

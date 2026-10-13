@@ -736,8 +736,8 @@ bool ml_raw_features(const double *features,size_t count,double *margins,size_t 
         const size_t base=silverfox_ml_model::TREE_OFFSETS[tree];std::int32_t node=0;
         for (;;) {
             const size_t at=base+static_cast<size_t>(node);const auto feature=silverfox_ml_model::FEATURES[at];
-            if (feature<0) {margins[tree%silverfox_ml_model::CLASS_COUNT]+=silverfox_ml_model::LEAF_VALUES[at];break;}
-            node=features[static_cast<size_t>(feature)]<=silverfox_ml_model::THRESHOLDS[at]?silverfox_ml_model::LEFT[at]:silverfox_ml_model::RIGHT[at];
+            if (feature<0) {margins[tree%silverfox_ml_model::CLASS_COUNT]+=silverfox_ml_model::NODE_VALUES[at];break;}
+            node=features[static_cast<size_t>(feature)]<=silverfox_ml_model::NODE_VALUES[at]?silverfox_ml_model::LEFT[at]:silverfox_ml_model::RIGHT[at];
         }
     }
     return true;

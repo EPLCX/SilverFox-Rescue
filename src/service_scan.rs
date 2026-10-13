@@ -360,7 +360,7 @@ fn sc_start(name:&str)->Vec<String>{
 
 /// Back up and disable the exact service before stopping it. SCM owns deferred deletion.
 fn delete_service_by_name(name:&str)->anyhow::Result<Vec<String>>{
-    use sha2::{Digest,Sha256};
+    use crate::hash::sha256;
     use windows_sys::Win32::System::{Registry::RegSaveKeyW,Services::{ChangeServiceConfigW,DeleteService,SERVICE_CHANGE_CONFIG,SERVICE_DISABLED,SERVICE_NO_CHANGE}};
     if name.trim().is_empty()||name.contains(['\\','/','\0']){anyhow::bail!("服务名无效");}
     let mut result=crate::quarantine::enable_cleanup_privileges().into_iter().map(|error|format!("清理权限：{}",error)).collect::<Vec<_>>();
@@ -378,7 +378,7 @@ fn delete_service_by_name(name:&str)->anyhow::Result<Vec<String>>{
             let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).ok_or_else(||anyhow::anyhow!("缺少 ProgramData"))?.join(r"SilverFoxRescue\repairs");
             std::fs::create_dir_all(&backup)?;
             let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
-            let service_id=hex::encode(Sha256::digest(name.as_bytes()));
+            let service_id=hex::encode(sha256(name.as_bytes()));
             let hive=backup.join(format!("service-{}-{}.hiv",&service_id[..16],stamp));
             let key_name=wide(OsStr::new(&format!(r"SYSTEM\CurrentControlSet\Services\{}",name)));let mut key=null_mut();
             let opened=RegOpenKeyExW(HKEY_LOCAL_MACHINE,key_name.as_ptr(),0,KEY_READ,&mut key);

@@ -3,7 +3,7 @@
 use crate::{model::{Finding, Verdict}, scanner::Scanner, AppState};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use crate::hash::sha256;
 use std::{collections::{HashSet,HashMap}, fs, path::{Path, PathBuf}, ptr::{null, null_mut},
     sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use windows_sys::Win32::System::Registry::*;
@@ -199,7 +199,7 @@ fn shortcut(path: &Path) -> Result<Entry> {
             (*link).GetArguments(args.as_mut_ptr(),args.len() as i32);
             (*link).GetWorkingDirectory(working.as_mut_ptr(),working.len() as i32);
             let text = |wide: &[u16]|String::from_utf16_lossy(&wide[..wide.iter().position(|word|*word==0).unwrap_or(wide.len())]);
-            Ok(Entry { kind:"startup".into(),location:path.display().to_string(),command:format!("\"{}\" {}",text(&target),text(&args)),working:text(&working),fingerprint:hex::encode(Sha256::digest(fs::read(path)?)),..Entry::default() })
+            Ok(Entry { kind:"startup".into(),location:path.display().to_string(),command:format!("\"{}\" {}",text(&target),text(&args)),working:text(&working),fingerprint:hex::encode(sha256(fs::read(path)?)),..Entry::default() })
         })();
         (*link).Release();
         result
@@ -269,7 +269,7 @@ fn file_inventory(entries: &mut Vec<Entry>, findings: &mut Vec<Finding>, cancel:
                     let bytes=fs::read(item.path())?;
                     if bytes.len()>4*1024*1024 { anyhow::bail!("计划任务文件超过 4 MiB"); }
                     for mut entry in task_actions(&decode_hosts(&bytes),&item.path().display().to_string())? {
-                        entry.fingerprint=hex::encode(Sha256::digest(&bytes));
+                        entry.fingerprint=hex::encode(sha256(&bytes));
                         if !entry.key.is_empty() {
                             for view in [KEY_WOW64_64KEY,KEY_WOW64_32KEY] {
                                 if let Some(key)=Key::open(HKEY_CLASSES_ROOT,&format!(r"CLSID\{}\InprocServer32",entry.key),KEY_READ|view)? {
@@ -541,7 +541,7 @@ pub fn remove_references(finding:&Finding,cancel:&AtomicBool)->Result<Vec<String
         let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join(r"SilverFoxRescue\repairs");
         fs::create_dir_all(&backup)?;
         let record=serde_json::to_vec(&entry)?;
-        let digest=hex::encode(Sha256::digest(&record));
+        let digest=hex::encode(sha256(&record));
         if !entry.hive.is_empty(){
             let root=match entry.hive.as_str(){"HKLM"=>HKEY_LOCAL_MACHINE,"HKU"=>HKEY_USERS,_=>anyhow::bail!("启动项注册表位置无效")};
             let view:u32=entry.view.parse()?;
@@ -555,7 +555,7 @@ pub fn remove_references(finding:&Finding,cancel:&AtomicBool)->Result<Vec<String
             let path=Path::new(&entry.location);
             if !path.try_exists()?{continue;}
             let bytes=fs::read(path)?;
-            if hex::encode(Sha256::digest(&bytes))!=entry.fingerprint{anyhow::bail!("引用已变化：{}",entry.location);}
+            if hex::encode(sha256(&bytes))!=entry.fingerprint{anyhow::bail!("引用已变化：{}",entry.location);}
             fs::write(backup.join(format!("reference-{digest}.json")),&record)?;
             fs::write(backup.join(format!("reference-{digest}.bak")),bytes)?;
             if entry.kind=="task"{
@@ -606,7 +606,7 @@ pub fn repair_configuration(finding: &Finding, cancel: &AtomicBool) -> Result<bo
         if key.string(&entry.value)?.as_deref()!=Some(&entry.command) { anyhow::bail!("配置已变化，请重新扫描"); }
         let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join(r"SilverFoxRescue\repairs");
         fs::create_dir_all(&backup)?;
-        let digest=hex::encode(Sha256::digest(record.as_bytes()));
+        let digest=hex::encode(sha256(record.as_bytes()));
         fs::write(backup.join(format!("ifeo-{digest}.json")),record)?;
         let status=unsafe{RegDeleteValueW(key.0,crate::wide(&entry.value).as_ptr())};
         if status!=0 { return Err(std::io::Error::from_raw_os_error(status as i32).into()); }
@@ -615,7 +615,7 @@ pub fn repair_configuration(finding: &Finding, cancel: &AtomicBool) -> Result<bo
     if finding.source != "quick-hosts" { return Ok(false); }
     let scanner=Scanner::load()?;
     let bytes = fs::read(&finding.path)?;
-    let digest = hex::encode(Sha256::digest(&bytes));
+    let digest = hex::encode(sha256(&bytes));
     if finding.sha256.as_deref() != Some(&digest) { anyhow::bail!("hosts 已变化，请重新扫描"); }
     let backup = std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?
         .join(r"SilverFoxRescue\repairs");

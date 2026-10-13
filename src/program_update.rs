@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use crate::hash::sha256;
 use std::{fs, path::Path};
 
 /// The program-update key is deliberately separate from the rule-library key.
@@ -36,7 +36,7 @@ pub fn verify_package(package: &Path, manifest_path: &Path) -> Result<()> {
     }
     if manifest.latest_version.trim().is_empty() { anyhow::bail!("更新版本为空"); }
     let bytes = fs::read(package).with_context(|| format!("无法读取更新包 {}", package.display()))?;
-    let digest = Sha256::digest(&bytes);
+    let digest = sha256(&bytes);
     let digest_hex = hex::encode(digest);
     if digest_hex != manifest.sha256.to_ascii_lowercase() { anyhow::bail!("更新包哈希不匹配"); }
     if PROGRAM_PUBLIC_KEY_HEX.len() != 64 { anyhow::bail!("未配置程序更新公钥"); }

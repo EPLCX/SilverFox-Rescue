@@ -1,5 +1,5 @@
 use std::{env,path::PathBuf};
-use sha2::{Digest,Sha256};
+use ring::digest::{Context, SHA256};
 
 fn verify_embedded_engine_section(engine:&[u8],version:&str,key:&[u8]){
     assert!(engine.len()>=0x40 && &engine[..2]==b"MZ","embedded engine DOS header invalid");
@@ -25,9 +25,9 @@ fn verify_embedded_engine_section(engine:&[u8],version:&str,key:&[u8]){
     assert!(version_len>0&&version_len<=19,"embedded engine signature version length invalid");
     assert_eq!(&slot[109..109+version_len],version.as_bytes(),"embedded engine signature version mismatch");
     assert!(slot[109+version_len..].iter().all(|byte|*byte==0),"embedded engine signature padding invalid");
-    let mut hash=Sha256::new();hash.update(&engine[..offset]);hash.update([0u8;128]);hash.update(&engine[offset+128..]);let digest=hash.finalize();
-    assert_eq!(&slot[12..44],digest.as_slice(),"embedded engine digest mismatch");
-    let mut message=b"SilverFoxRescue/PE-engine-sign/v1\0".to_vec();message.extend_from_slice(version.as_bytes());message.push(0);message.extend_from_slice(&(engine.len()as u64).to_le_bytes());message.extend_from_slice(&digest);
+    let mut hash=Context::new(&SHA256);hash.update(&engine[..offset]);hash.update(&[0u8;128]);hash.update(&engine[offset+128..]);let digest=hash.finish();
+    assert_eq!(&slot[12..44],digest.as_ref(),"embedded engine digest mismatch");
+    let mut message=b"SilverFoxRescue/PE-engine-sign/v1\0".to_vec();message.extend_from_slice(version.as_bytes());message.push(0);message.extend_from_slice(&(engine.len()as u64).to_le_bytes());message.extend_from_slice(digest.as_ref());
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519,key).verify(&message,&slot[44..108]).expect("embedded engine signature invalid");
 }
 fn main(){
