@@ -56,7 +56,7 @@ pub fn repair_installed_package_from_embedded() -> Result<()> {
     Ok(())
 }
 
-fn rules_root()->Result<PathBuf>{Ok(std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join("SilverFoxRescue").join("rules"))}
+fn rules_root()->Result<PathBuf>{Ok(crate::data_dir::secure()?.join("rules"))}
 fn wide(path:&Path)->Vec<u16>{use std::os::windows::ffi::OsStrExt;path.as_os_str().encode_wide().chain(Some(0)).collect()}
 
 pub fn read_installed_package()->Result<Option<(Vec<u8>,Manifest)>>{

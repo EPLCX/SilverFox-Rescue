@@ -375,7 +375,7 @@ fn delete_service_by_name(name:&str)->anyhow::Result<Vec<String>>{
             return Err(error.into());
         }
         let operation=(||->anyhow::Result<()>{
-            let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).ok_or_else(||anyhow::anyhow!("缺少 ProgramData"))?.join(r"SilverFoxRescue\repairs");
+            let backup=crate::data_dir::secure()?.join("repairs");
             std::fs::create_dir_all(&backup)?;
             let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
             let service_id=hex::encode(sha256(name.as_bytes()));

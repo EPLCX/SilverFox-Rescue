@@ -538,7 +538,7 @@ pub fn remove_references(finding:&Finding,cancel:&AtomicBool)->Result<Vec<String
         if cancel.load(Ordering::Acquire){anyhow::bail!("处理已取消");}
         let identity=format!("{}:{}:{}:{}",entry.location,entry.view,entry.key,entry.value);
         if !removed.insert(identity){continue;}
-        let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join(r"SilverFoxRescue\repairs");
+        let backup=crate::data_dir::secure()?.join("repairs");
         fs::create_dir_all(&backup)?;
         let record=serde_json::to_vec(&entry)?;
         let digest=hex::encode(sha256(&record));
@@ -604,7 +604,7 @@ pub fn repair_configuration(finding: &Finding, cancel: &AtomicBool) -> Result<bo
             || !["Debugger","MonitorProcess"].contains(&entry.value.as_str()) { anyhow::bail!("IFEO 处置记录无效"); }
         let key = Key::open(HKEY_LOCAL_MACHINE,&entry.key,KEY_QUERY_VALUE|KEY_SET_VALUE|view)?.context("配置已变化，请重新扫描")?;
         if key.string(&entry.value)?.as_deref()!=Some(&entry.command) { anyhow::bail!("配置已变化，请重新扫描"); }
-        let backup=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join(r"SilverFoxRescue\repairs");
+        let backup=crate::data_dir::secure()?.join("repairs");
         fs::create_dir_all(&backup)?;
         let digest=hex::encode(sha256(record.as_bytes()));
         fs::write(backup.join(format!("ifeo-{digest}.json")),record)?;
@@ -617,8 +617,7 @@ pub fn repair_configuration(finding: &Finding, cancel: &AtomicBool) -> Result<bo
     let bytes = fs::read(&finding.path)?;
     let digest = hex::encode(sha256(&bytes));
     if finding.sha256.as_deref() != Some(&digest) { anyhow::bail!("hosts 已变化，请重新扫描"); }
-    let backup = std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?
-        .join(r"SilverFoxRescue\repairs");
+    let backup = crate::data_dir::secure()?.join("repairs");
     fs::create_dir_all(&backup)?;
     fs::write(backup.join(format!("hosts-{digest}.bak")), &bytes)?;
     let repaired = if bytes.starts_with(&[0xff,0xfe]) || bytes.starts_with(&[0xfe,0xff]) {

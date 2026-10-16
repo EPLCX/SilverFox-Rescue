@@ -6,7 +6,7 @@ use aes::Aes256;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::{ffi::OsStr,fs,io::{Read,Write},os::windows::ffi::OsStrExt,path::{Path,PathBuf},ptr::{null,null_mut},time::{Duration,SystemTime,UNIX_EPOCH}};
-use windows_sys::Win32::Storage::FileSystem::{DeleteFileW,GetFileAttributesW,MoveFileExW,SetFileAttributesW,FILE_ATTRIBUTE_NORMAL,FILE_ATTRIBUTE_READONLY,FILE_ATTRIBUTE_HIDDEN,FILE_ATTRIBUTE_SYSTEM,INVALID_FILE_ATTRIBUTES,MOVEFILE_DELAY_UNTIL_REBOOT};
+use windows_sys::Win32::Storage::FileSystem::{DeleteFileW,MoveFileExW,FILE_ATTRIBUTE_NORMAL,FILE_ATTRIBUTE_READONLY,FILE_ATTRIBUTE_HIDDEN,FILE_ATTRIBUTE_SYSTEM,MOVEFILE_DELAY_UNTIL_REBOOT};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineRecord { pub id: String, pub original_path: PathBuf, pub stored_path: PathBuf, #[serde(default)] pub pending_reboot:bool, #[serde(default)] pub encrypted:bool, pub finding: Finding }
@@ -18,7 +18,7 @@ fn key()->[u8;32]{sha256(b"SilverFoxRescue quarantine format v1 fixed local key"
 fn encrypt_file(source:&Path,destination:&Path,expected_digest:&str)->Result<()> {
     let mut nonce=[0u8;16];SystemRandom::new().fill(&mut nonce).map_err(|_|anyhow::anyhow!("隔离区随机数生成失败"))?;
     let mut cipher=Cipher::new(&key().into(),&nonce.into());
-    let mut input=fs::File::open(source)?;
+    let mut input=crate::scanner::open_file_for_scan(source)?;
     let mut output=fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
     output.write_all(MAGIC)?;output.write_all(&nonce)?;
     let mut buffer=[0u8;65536];let mut hash=ring::digest::Context::new(&ring::digest::SHA256);
@@ -39,9 +39,9 @@ fn decrypt_file(source:&Path,destination:&Path,expected_digest:&str)->Result<()>
     if result.is_err(){drop(output);let _=fs::remove_file(destination);}result
 }
 
-fn root() -> PathBuf {
-    std::env::var_os("PROGRAMDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("SilverFoxRescue").join("quarantine")
-}
+fn root() -> PathBuf { crate::data_dir::path().join("quarantine") }
+// Records and payloads below the root are trusted only once the root is protected.
+fn secured_root() -> Result<PathBuf> { Ok(crate::data_dir::secure()?.join("quarantine")) }
 
 /// Returns true for the quarantine root itself and every stored object below it.
 /// This is deliberately path based instead of relying on a marker file: a scan
@@ -83,7 +83,7 @@ where F:FnMut(usize,&anyhow::Error){
     // Repair access before reopening the selected file, not only after deletion fails.
     let repair=repair_file_access(&finding.path);
     crate::audit::record("file_access_repair",&format!("{}：{}",finding.path.display(),repair));
-    let mut file = fs::File::open(&finding.path).context("处置前无法重新打开文件")?;
+    let mut file = crate::scanner::open_file_for_scan(&finding.path).context("处置前无法重新打开文件")?;
     let mut current = ring::digest::Context::new(&ring::digest::SHA256);
     let mut buffer = [0u8; 64 * 1024];
     loop { let n = file.read(&mut buffer)?; if n == 0 { break; } current.update(&buffer[..n]); }
@@ -91,7 +91,7 @@ where F:FnMut(usize,&anyhow::Error){
     drop(file);
     if digest.len()<12{anyhow::bail!("文件哈希格式错误");}
     let id = format!("{}-{}", SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(), &digest[..12]);
-    let dir = root().join(&id);
+    let dir = secured_root()?.join(&id);
     fs::create_dir_all(&dir)?;
     let stored = dir.join("payload.enc");
     if let Err(error)=encrypt_file(&finding.path,&stored,digest){let _=fs::remove_file(&stored);return Err(error).context("加密隔离副本失败，原文件未删除");}
@@ -113,7 +113,7 @@ where F:FnMut(usize,&anyhow::Error){
 
 pub fn list() -> Result<Vec<QuarantineRecord>> {
     let mut out = Vec::new();
-    let root = root();
+    let root = secured_root()?;
     if !root.exists() { return Ok(out); }
     for e in fs::read_dir(root)? {
         let p = e?.path().join("record.json");
@@ -124,7 +124,7 @@ pub fn list() -> Result<Vec<QuarantineRecord>> {
 
 pub fn restore(id: &str) -> Result<()> {
     if !valid_id(id){anyhow::bail!("无效隔离编号");}
-    let dir=root().join(id);
+    let dir=secured_root()?.join(id);
     let record: QuarantineRecord = serde_json::from_slice(&fs::read(dir.join("record.json"))?)?;
     if record.id!=id || record.stored_path!=dir.join(if record.encrypted{"payload.enc"}else{"payload.bin"}){anyhow::bail!("隔离记录路径不一致");}
     if record.pending_reboot&&!record.stored_path.exists(){anyhow::bail!("该文件已安排重启后隔离，请重启后再恢复");}
@@ -145,7 +145,7 @@ pub fn restore(id: &str) -> Result<()> {
 fn valid_id(id:&str)->bool{!id.is_empty()&&id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-')}
 
 pub fn delete_all()->Result<usize>{
-    let base=root();if !base.exists(){return Ok(0);}
+    let base=secured_root()?;if !base.exists(){return Ok(0);}
     let mut deleted=0;
     for entry in fs::read_dir(&base)?{
         let entry=entry?;let dir=entry.path();
@@ -180,25 +180,51 @@ pub(crate) fn enable_cleanup_privileges()->Vec<String>{
     errors
 }
 
-fn repair_file_access(path:&Path)->String{
-    use windows_sys::Win32::Security::{CreateWellKnownSid,WinWorldSid,OWNER_SECURITY_INFORMATION,DACL_SECURITY_INFORMATION,PROTECTED_DACL_SECURITY_INFORMATION,Authorization::{SetNamedSecurityInfoW,SE_FILE_OBJECT}};
-    let value=wide(path.as_os_str());let mut errors=enable_cleanup_privileges();
-    unsafe{
-        let attributes=GetFileAttributesW(value.as_ptr());
-        if attributes==INVALID_FILE_ATTRIBUTES{return format!("读取文件属性失败：{}",std::io::Error::last_os_error());}
-        let cleared=attributes&!(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM);
-        if SetFileAttributesW(value.as_ptr(),if cleared==0{FILE_ATTRIBUTE_NORMAL}else{cleared})==0{errors.push(format!("清除文件属性失败：{}",std::io::Error::last_os_error()));}
-        let mut sid=[0u32;17];let mut length=std::mem::size_of_val(&sid)as u32;
-        if CreateWellKnownSid(WinWorldSid,null_mut(),sid.as_mut_ptr().cast(),&mut length)==0{errors.push(format!("创建所有者 SID 失败：{}",std::io::Error::last_os_error()));}
-        else{
-            // Match the examined killer: take ownership, then remove the target's DACL restrictions.
-            let owner=SetNamedSecurityInfoW(value.as_ptr(),SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION,sid.as_mut_ptr().cast(),null_mut(),null(),null());
-            if owner!=0{errors.push(format!("接管所有权失败：Windows 错误 {}",owner));}
-            let dacl=SetNamedSecurityInfoW(value.as_ptr(),SE_FILE_OBJECT,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,null_mut(),null_mut(),null(),null());
-            if dacl!=0{errors.push(format!("解除 DACL 限制失败：Windows 错误 {}",dacl));}
-        }
+pub(crate) fn repair_file_access(path:&Path)->String{
+    let mut errors=enable_cleanup_privileges();
+    if let Err(error)=restrict_to_administrators(path){errors.push(format!("{error:#}"));}
+    if errors.is_empty(){"已清除只读/隐藏/系统属性，所有权和权限已收归管理员与 SYSTEM".into()}else{errors.join("；")}
+}
+
+/// Clears blocking attributes and hands the file to Administrators and SYSTEM only. The
+/// handle does not follow reparse points and its final path must match the selected path,
+/// so a junction or link swapped in after the scan cannot redirect this to another file.
+/// Even when the later hash check rejects the file, no non-administrator gains access.
+fn restrict_to_administrators(path:&Path)->Result<()>{
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{Foundation::HANDLE,Storage::FileSystem::{FileBasicInfo,GetFinalPathNameByHandleW,SetFileInformationByHandle,FILE_BASIC_INFO,FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE,FILE_WRITE_ATTRIBUTES,FILE_ATTRIBUTE_DIRECTORY,FILE_ATTRIBUTE_REPARSE_POINT,GetLongPathNameW,VOLUME_NAME_DOS}};
+    let expected=std::path::absolute(path)?;
+    // Expand 8.3 components (registry and service paths often use them). This maps names
+    // per component and does not resolve junctions, so the redirect check below still holds.
+    let expected={
+        let short=wide(expected.as_os_str());let mut long=vec![0u16;32768];
+        let length=unsafe{GetLongPathNameW(short.as_ptr(),long.as_mut_ptr(),long.len() as u32)} as usize;
+        if length==0||length>=long.len(){expected}else{PathBuf::from(String::from_utf16_lossy(&long[..length]))}
+    };
+    let file=crate::data_dir::open_for_security(&expected,FILE_WRITE_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE).context("打开文件失败")?;
+    let handle=file.as_raw_handle() as HANDLE;
+    let info=crate::data_dir::information(&file)?;
+    if info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT!=0{anyhow::bail!("目标是重解析点，拒绝修改权限");}
+    if info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY!=0{anyhow::bail!("目标是目录，拒绝修改权限");}
+    if info.nNumberOfLinks>1{anyhow::bail!("目标有 {} 个硬链接，拒绝修改权限",info.nNumberOfLinks);}
+    let mut buffer=vec![0u16;32768];
+    let length=unsafe{GetFinalPathNameByHandleW(handle,buffer.as_mut_ptr(),buffer.len() as u32,VOLUME_NAME_DOS)} as usize;
+    if length==0||length>=buffer.len(){return Err(std::io::Error::last_os_error()).context("读取文件实际路径失败");}
+    let actual=PathBuf::from(String::from_utf16_lossy(&buffer[..length]));
+    if normalized_path(&actual)!=normalized_path(&expected){anyhow::bail!("文件实际位于 {}，与所选路径不一致，拒绝修改权限",actual.display());}
+    let cleared=info.dwFileAttributes&!(FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM);
+    if cleared!=info.dwFileAttributes{
+        // Zero timestamps leave the existing values unchanged.
+        let basic=FILE_BASIC_INFO{CreationTime:0,LastAccessTime:0,LastWriteTime:0,ChangeTime:0,FileAttributes:if cleared==0{FILE_ATTRIBUTE_NORMAL}else{cleared}};
+        if unsafe{SetFileInformationByHandle(handle,FileBasicInfo,(&basic as *const FILE_BASIC_INFO).cast(),std::mem::size_of::<FILE_BASIC_INFO>() as u32)}==0{return Err(std::io::Error::last_os_error()).context("清除文件属性失败");}
     }
-    if errors.is_empty(){"已清除只读/隐藏/系统属性，接管所有权并解除 DACL 限制".into()}else{errors.join("；")}
+    crate::data_dir::Descriptor::from_sddl(crate::data_dir::FILE_SDDL)?.apply(handle).context("收归所有权和权限失败")
+}
+
+fn normalized_path(path:&Path)->String{
+    let text=path.to_string_lossy().replace('/',"\\");
+    let text=match text.strip_prefix(r"\\?\UNC\"){Some(rest)=>format!(r"\\{rest}"),None=>text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()};
+    text.to_lowercase()
 }
 
 fn delete_file_checked(path:&Path)->std::io::Result<()>{
@@ -219,23 +245,38 @@ fn pending_delete_matches(data:&[u16],source:&Path)->bool{
 }
 
 fn schedule_delete_after_reboot(source:&Path)->Result<()>{
-    use windows_sys::Win32::System::Registry::{RegGetValueW,HKEY_LOCAL_MACHINE,RRF_RT_REG_MULTI_SZ};
-    let source=if source.is_absolute(){source.to_path_buf()}else{std::env::current_dir()?.join(source)};
+    let source=std::path::absolute(source)?;
     let value=wide(source.as_os_str());
     if unsafe{MoveFileExW(value.as_ptr(),null(),MOVEFILE_DELAY_UNTIL_REBOOT)}==0{
-        return Err(std::io::Error::last_os_error()).context("无法登记重启后删除");
+        return Err(std::io::Error::last_os_error()).with_context(||format!("无法登记重启后删除 {}",source.display()));
     }
+    // MoveFileExW success means Windows accepted the registration. A separate
+    // registry read can fail or race with another writer without undoing it.
+    if let Err(error)=verify_pending_delete(&source){
+        crate::audit::record("pending_delete_verify",&format!("重启删除登记核对失败 {}：{error:#}",source.display()));
+    }
+    Ok(())
+}
+
+fn verify_pending_delete(source:&Path)->Result<()>{
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::System::Registry::{RegGetValueW,HKEY_LOCAL_MACHINE,RRF_RT_REG_MULTI_SZ};
     let key=wide(OsStr::new(r"SYSTEM\CurrentControlSet\Control\Session Manager"));
     let name=wide(OsStr::new("PendingFileRenameOperations"));
     let mut length=0;
     let status=unsafe{RegGetValueW(HKEY_LOCAL_MACHINE,key.as_ptr(),name.as_ptr(),RRF_RT_REG_MULTI_SZ,null_mut(),null_mut(),&mut length)};
     if status!=0{anyhow::bail!("读取重启删除登记失败：Windows 错误 {}",status);}
-    let mut data=vec![0u16;(length as usize+1)/2];
-    let status=unsafe{RegGetValueW(HKEY_LOCAL_MACHINE,key.as_ptr(),name.as_ptr(),RRF_RT_REG_MULTI_SZ,null_mut(),data.as_mut_ptr().cast(),&mut length)};
-    if status!=0{anyhow::bail!("核对重启删除登记失败：Windows 错误 {}",status);}
-    data.truncate(length as usize/2);
-    if !pending_delete_matches(&data,&source){anyhow::bail!("重启删除列表中未找到目标文件；加密副本已保留");}
-    Ok(())
+    for _ in 0..3{
+        let mut data=vec![0u16;(length as usize+1)/2];
+        length=(data.len()*2)as u32;
+        let status=unsafe{RegGetValueW(HKEY_LOCAL_MACHINE,key.as_ptr(),name.as_ptr(),RRF_RT_REG_MULTI_SZ,null_mut(),data.as_mut_ptr().cast(),&mut length)};
+        if status==ERROR_MORE_DATA{continue;}
+        if status!=0{anyhow::bail!("核对重启删除登记失败：Windows 错误 {}",status);}
+        data.truncate(length as usize/2);
+        if !pending_delete_matches(&data,source){anyhow::bail!("重启删除列表中未找到目标文件；加密副本已保留");}
+        return Ok(());
+    }
+    anyhow::bail!("核对重启删除登记时数据持续变化")
 }
 
 pub fn export_report(path: &Path, findings: &[Finding]) -> Result<()> {
@@ -317,5 +358,23 @@ mod tests {
         assert_eq!(exported.len(),2);
         assert!(exported.iter().all(Finding::in_report));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test] #[ignore="需要管理员权限，修改临时文件的所有者和 DACL"]
+    fn access_repair_restricts_to_administrators_and_refuses_redirects(){
+        use crate::data_dir::tests::{junction,sddl_of};
+        let base=std::env::temp_dir().join(format!("silverfox-access-repair-{}",std::process::id()));
+        let real=base.join("real");fs::create_dir_all(&real).unwrap();
+        let target=real.join("sample.exe");fs::write(&target,b"MZ").unwrap();
+        junction(&base.join("via"),&real);
+        let before=sddl_of(&target);
+        let error=restrict_to_administrators(&base.join("via").join("sample.exe")).unwrap_err();
+        assert!(format!("{error:#}").contains("不一致"),"{error:#}");
+        assert_eq!(sddl_of(&target),before);
+        restrict_to_administrators(&target).unwrap();
+        let after=sddl_of(&target);
+        assert_eq!(after,"O:BAD:PAI(A;;FA;;;SY)(A;;FA;;;BA)");
+        assert!(!after.contains(";;;WD)")&&!after.starts_with("O:WD"));
+        fs::remove_dir(base.join("via")).unwrap();fs::remove_dir_all(&base).unwrap();
     }
 }

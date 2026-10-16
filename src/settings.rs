@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use anyhow::{Context, Result};
 use ring::{aead, rand::{SecureRandom, SystemRandom}};
-use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, os::windows::{ffi::OsStrExt, fs::OpenOptionsExt}, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
+use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, os::windows::{ffi::OsStrExt, fs::OpenOptionsExt}, path::Path, sync::{Mutex, OnceLock}};
 use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::{CryptProtectData,CryptUnprotectData,CRYPT_INTEGER_BLOB,CRYPTPROTECT_UI_FORBIDDEN}, Storage::FileSystem::{MoveFileExW,MOVEFILE_REPLACE_EXISTING,MOVEFILE_WRITE_THROUGH,FILE_SHARE_READ}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ fn normalize(mut value:Settings)->Settings{
     for option in [&mut value.gpu,&mut value.hide_controls,&mut value.input_protection]{if !matches!(option.as_str(),"auto"|"enabled"|"disabled"){*option="auto".into();}}
     if !matches!(value.update_channel.as_str(),"stable"|"beta"){value.update_channel="stable".into();}value
 }
-fn root()->PathBuf{std::env::var_os("PROGRAMDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("SilverFoxRescue")}
+fn root()->&'static Path{crate::data_dir::path()}
 const MAGIC:&[u8;8]=b"SFRSET02";
 const LIMIT:u64=1024*1024;
 struct Storage{value:Settings,guard:Option<File>}
@@ -77,6 +77,8 @@ fn write_atomic(path:&Path,value:&Settings,held:&mut Option<File>)->Result<File>
     })();if result.is_err(){let _=fs::remove_file(&temp);}result
 }
 fn initialize()->Storage{
+    // Settings stored in an unprotected root cannot be trusted or safely written.
+    if let Err(error)=crate::data_dir::secure(){crate::audit::record("settings",&format!("数据目录不可信，使用默认设置：{error:#}"));return Storage{value:Settings::default(),guard:None};}
     let path=root().join("settings.enc");
     match read_locked(&path){
         Ok((guard,bytes))=>{let value=match decode(&bytes){Ok(value)=>{remove_legacy();value},Err(error)=>{crate::audit::record("settings",&format!("设置解密/认证失败，恢复默认值，控件保护为自动：{error}"));Settings::default()}};return Storage{value,guard:Some(guard)};}
@@ -93,7 +95,7 @@ fn remove_legacy(){for name in ["settings.json","settings.pending"]{if let Err(e
 pub fn load()->Settings{storage().lock().unwrap_or_else(|error|error.into_inner()).value.clone()}
 pub fn selected_update_channel()->&'static str{if load().update_channel=="beta"{"beta"}else{"stable"}}
 pub fn save(value:&Settings)->Result<()>{
-    let value=normalize(value.clone());let mut store=storage().lock().unwrap_or_else(|error|error.into_inner());let path=root().join("settings.enc");
+    crate::data_dir::secure()?;let value=normalize(value.clone());let mut store=storage().lock().unwrap_or_else(|error|error.into_inner());let path=root().join("settings.enc");
     match write_atomic(&path,&value,&mut store.guard){Ok(guard)=>{store.guard=Some(guard);store.value=value;Ok(())},Err(error)=>{if store.guard.is_none(){store.guard=read_locked(&path).ok().map(|(guard,_)|guard);}Err(error)}}
 }
 

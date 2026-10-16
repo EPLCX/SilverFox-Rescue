@@ -2,7 +2,7 @@
 //! Host ABI for the signed, updateable algorithm DLL. No verdict logic lives here.
 use anyhow::{Context, Result};
 use crate::hash::sha256;
-use std::{ffi::{c_char, CStr, CString}, fs, io::Write, path::{Path, PathBuf}, sync::atomic::{AtomicU64,Ordering}};
+use std::{ffi::{c_char, CStr, CString}, fs, io::Write, path::Path, sync::atomic::{AtomicU64,Ordering}};
 use windows_sys::Win32::{Foundation::FreeLibrary,System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32}};
 
 #[repr(C)]
@@ -110,7 +110,7 @@ impl Engine {
         crate::updater::verify_engine_bytes(bytes,expected_version)
             .context("算法 DLL 加载前签名校验失败")?;
         // File analysis runs in the elevated Administrator UI process.
-        let root=std::env::var_os("PROGRAMDATA").map(PathBuf::from).context("缺少 ProgramData")?.join("SilverFoxRescue").join("rules").join("engines");
+        let root=crate::data_dir::secure()?.join("rules").join("engines");
         let digest=hex::encode(sha256(bytes));
         let dir=root.join(&digest);
         fs::create_dir_all(&dir).context("无法创建算法目录")?;

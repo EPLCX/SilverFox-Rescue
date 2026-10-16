@@ -16,6 +16,7 @@ mod service_scan;
 mod quick_scan;
 mod result_scroll;
 mod audit;
+mod data_dir;
 mod paint_cache;
 mod page_transition;
 mod updater;
@@ -2617,11 +2618,22 @@ unsafe fn remediate(hwnd:HWND){
                 app.progress_done.store(position+1,Ordering::Relaxed);
                 continue;
             }
-            let Some(fresh)=scanner.scan_file_cancellable(&finding.path,&app.scan_cancel)else{
+            let mut fresh=scanner.scan_file_cancellable(&finding.path,&app.scan_cancel);
+            if fresh.as_ref().is_some_and(|result|result.verdict==Verdict::Incomplete&&result.sha256.is_none()){
+                let repair=quarantine::repair_file_access(&finding.path);
+                queue(format!("[{}/{}] 处置前读取修复：{}",position+1,count,repair));
+                fresh=scanner.scan_file_cancellable(&finding.path,&app.scan_cancel);
+            }
+            let Some(fresh)=fresh else{
                 if app.scan_cancel.load(Ordering::Acquire){queue("处理已停止。");break;}
                 app.progress_done.store(position+1,Ordering::Relaxed);
                 continue;
             };
+            if fresh.verdict==Verdict::Incomplete&&fresh.sha256.is_none(){
+                queue(format!("[{}/{}] 处置前无法重新读取 {}：{}",position+1,count,finding.path.display(),fresh.evidence.join("；")));
+                app.progress_done.store(position+1,Ordering::Relaxed);
+                continue;
+            }
             if fresh.sha256!=finding.sha256||!matches!(fresh.verdict,Verdict::Malicious|Verdict::Suspicious){
                 queue(format!("[{}/{}] 已跳过：文件已变化或复检结论改变",position+1,count));
                 app.progress_done.store(position+1,Ordering::Relaxed);
@@ -2983,7 +2995,7 @@ unsafe fn start_program_update(hwnd:HWND){
 
 fn prepare_program_update(client:&cloud::CloudClient, manifest:&cloud::ProgramManifest)->anyhow::Result<PreparedProgramUpdate> {
     let executable=std::env::current_exe()?;
-    let root=std::env::var_os("PROGRAMDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("SilverFoxRescue").join("updates");
+    let root=data_dir::secure()?.join("updates");
     std::fs::create_dir_all(&root)?;
     let package=root.join(format!("silverfox-rescue-{}.zip",manifest.latest_version.as_deref().unwrap_or("unknown")));
     let manifest_path=root.join(format!("manifest-{}.json",manifest.latest_version.as_deref().unwrap_or("unknown")));
@@ -3157,6 +3169,10 @@ fn main() {
     if let Err(error)=audit::initialize(){
         unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("审计日志初始化失败：{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
         return;
+    }
+    if let Err(error)=data_dir::secure(){
+        unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("数据目录 {} 权限不可信，程序已阻止启动：\r\n{error:#}",data_dir::path().display())).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}
+        std::process::exit(3);
     }
     if let Err(error)=updater::embedded_engine(){
         unsafe{prompt_box::MessageBoxNew(null_mut(),wide(&format!("内嵌算法 DLL 验证失败，程序已阻止启动：\r\n{error:#}")).as_ptr(),wide("启动失败").as_ptr(),MB_OK|MB_ICONERROR);}

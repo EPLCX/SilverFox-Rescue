@@ -363,7 +363,7 @@ fn enable_backup_privilege()->bool{
     })
 }
 
-fn open_file_for_scan(path:&Path)->std::io::Result<File>{
+pub(crate) fn open_file_for_scan(path:&Path)->std::io::Result<File>{
     match File::open(path){
         Ok(file)=>Ok(file),
         Err(direct_error)=>{
