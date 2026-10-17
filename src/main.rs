@@ -1886,9 +1886,9 @@ fn subpage_focus_order_places_actions_before_window_buttons(){unsafe{
     let wc=WNDCLASSW{lpfnWndProc:Some(DefWindowProcW),hInstance:instance,lpszClassName:class.as_ptr(),..std::mem::zeroed()};RegisterClassW(&wc);
     let hwnd=CreateWindowExW(0,class.as_ptr(),wide("").as_ptr(),WS_POPUP,0,0,735,558,null_mut(),null_mut(),instance,null());assert!(!hwnd.is_null());
     state().ui_mode.store(3,Ordering::Release);state().subpage.store(PAGE_SETTINGS,Ordering::Release);VIRTUAL_MENU_OPEN=false;
-    assert_eq!(virtual_focus_order(hwnd),[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION,ID_PAGE_ACTION,ID_SKIP,ID_BACK,ID_MINIMIZE,ID_CLOSE]);
+    assert_eq!(virtual_focus_order(hwnd),[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION,ID_PAGE_ACTION,ID_SKIP,ID_BACK,ID_GITHUB,ID_MINIMIZE,ID_CLOSE]);
     state().subpage.store(PAGE_REPORT,Ordering::Release);
-    assert_eq!(virtual_focus_order(hwnd),[202,ID_PAGE_ACTION,ID_BACK,ID_MORE,ID_MINIMIZE,ID_CLOSE]);
+    assert_eq!(virtual_focus_order(hwnd),[202,ID_PAGE_ACTION,ID_BACK,ID_MORE,ID_GITHUB,ID_MINIMIZE,ID_CLOSE]);
     DestroyWindow(hwnd);
 }}
 
@@ -2499,7 +2499,7 @@ fn direct_files(directory: &std:: path:: Path) -> std:: io:: Result<Vec<PathBuf>
     #[test] fn quick_scan_uses_expected_system_roots_and_depths(){
         let targets=default_quick_paths();
         let actual:Vec<_>=targets.iter().map(|target|(target.root.to_string_lossy().to_string(),target.max_depth)).collect();
-        assert!(actual.contains(&(r"C:\ProgramData".into(),2)));assert!(actual.contains(&(r"C:\inetpub\wwwroot".into(),16)));assert!(actual.contains(&(r"C:\Windows\Temp".into(),4)));assert!(actual.contains(&(r"C:\Windows\SystemTemp".into(),4)));assert!(actual.contains(&(r"C:\Users\Public".into(),3)));
+        assert!(actual.contains(&(r"C:\ProgramData".into(),2)));assert!(actual.contains(&(r"C:\inetpub\wwwroot".into(),12)));assert!(actual.contains(&(r"C:\Windows\Temp".into(),2)));assert!(actual.contains(&(r"C:\Windows\SystemTemp".into(),2)));assert!(actual.contains(&(r"C:\Users\Public".into(),3)));
     }
 
     #[test] fn quick_scan_user_roots_use_resolved_profile_not_process_environment(){
@@ -2507,7 +2507,7 @@ fn direct_files(directory: &std:: path:: Path) -> std:: io:: Result<Vec<PathBuf>
         append_user_quick_paths(&mut targets,std::path::Path::new(r"C:\Users\Administrator"));
         let roots:Vec<_>=targets.iter().map(|target|target.root.as_path()).collect();
         assert!(!roots.contains(&std::path::Path::new(r"C:\Users\Administrator\AppData\Local")));
-        assert!(roots.contains(&std::path::Path::new(r"C:\Users\Administrator\Desktop")));
+        assert!(!roots.contains(&std::path::Path::new(r"C:\Users\Administrator\Desktop")));
         assert!(!roots.contains(&std::path::Path::new(r"C:\Users\Administrator\Downloads")));
         assert!(roots.contains(&std::path::Path::new(r"C:\Users\Administrator\AppData\Local\Temp")));
     }

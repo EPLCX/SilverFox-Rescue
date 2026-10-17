@@ -277,8 +277,12 @@ fn accessible_object_marshals_through_msaa(){unsafe{
     let mut received:*mut c_void=null_mut();
     assert_eq!(AccessibleObjectFromWindow(hwnd,OBJID_CLIENT as u32,&IID_ACCESSIBLE,&mut received),S_OK);
     assert!(!received.is_null());
-    let mut count=0i32;assert_eq!(child_count(received,&mut count),S_OK);assert!(count>=3);
-    release(received);DestroyWindow(hwnd);
+    // The result is a COM proxy, not our Accessible, so call through its own vtable.
+    let vtable=*(received as *const *const usize);
+    let get_child_count:unsafe extern "system" fn(*mut c_void,*mut i32)->i32=std::mem::transmute(*vtable.add(8));
+    let proxy_release:unsafe extern "system" fn(*mut c_void)->u32=std::mem::transmute(*vtable.add(2));
+    let mut count=0i32;assert_eq!(get_child_count(received,&mut count),S_OK);assert!(count>=3);
+    proxy_release(received);DestroyWindow(hwnd);
     if initialized{CoUninitialize();}
 }}
 
