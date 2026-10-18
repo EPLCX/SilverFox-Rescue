@@ -154,20 +154,24 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             crate::theme::fill(dc,&client);SetBkMode(dc,TRANSPARENT as i32);
             let dpi=crate::dpi::window_dpi(hwnd).max(96)as i32;let s=|n:i32|n*dpi/96;
             let old=SelectObject(dc,crate::paint_cache::font(-s(12)));
-            SetTextColor(dc,crate::theme::color(0x00000000));let mut title=RECT{left:s(14),top:0,right:dialog.close_rect.left,bottom:dialog.close_rect.bottom};DrawTextW(dc,dialog.title.as_ptr(),-1,&mut title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
+            SetTextColor(dc,crate::theme::role(crate::theme::Role::OnSurface));let mut title=RECT{left:s(14),top:0,right:dialog.close_rect.left,bottom:dialog.close_rect.bottom};DrawTextW(dc,dialog.title.as_ptr(),-1,&mut title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
             crate::draw_shared_button(&control_item(hwnd,dc,dialog,dialog.buttons.len()+1),&[],false,crate::paint_cache::font(-s(12)));
-            SelectObject(dc,crate::paint_cache::font(-s(13)));SetTextColor(dc,crate::theme::color(0x00000000));
+            SelectObject(dc,crate::paint_cache::font(-s(crate::theme::BODY_MEDIUM)));SetTextColor(dc,crate::theme::role(crate::theme::Role::OnSurfaceVariant));
             if !dialog.icon.is_null(){DrawIconEx(dc,s(24),s(68),dialog.icon,s(32),s(32),0,null_mut(),DI_NORMAL);}
             let text_saved=SaveDC(dc);IntersectClipRect(dc,dialog.text_rect.left,dialog.text_rect.top,dialog.text_rect.right,dialog.text_rect.bottom);
             let mut text=dialog.text_rect;text.top-=dialog.scroll.get();text.bottom=text.top+dialog.text_height;
             let alignment=if dialog.flags&MB_RIGHT!=0{DT_RIGHT}else{DT_LEFT};let rtl=if dialog.flags&MB_RTLREADING!=0{DT_RTLREADING}else{0};DrawTextW(dc,dialog.text.as_ptr(),-1,&mut text,DT_WORDBREAK|alignment|rtl|DT_NOPREFIX);RestoreDC(dc,text_saved);
-            SelectObject(dc,crate::paint_cache::font(-s(12)));
+            let label_font=crate::paint_cache::font(-s(crate::theme::LABEL_LARGE));
+            SelectObject(dc,label_font);
             for(index,button)in dialog.buttons.iter().enumerate(){
                 if RectVisible(dc,&button.rect)==0{continue;}
                 let primary=button.id!=IDCANCEL&&button.id!=IDNO&&button.id!=IDHELP;
-                crate::draw_shared_button(&control_item(hwnd,dc,dialog,index),&button.label,primary,crate::paint_cache::font(-s(12)));
+                crate::draw_shared_button(&control_item(hwnd,dc,dialog,index),&button.label,primary,label_font);
             }
-            if dialog.keyboard.get()&&dialog.focus.get()!=dialog.buttons.len(){crate::paint_control_focus(dc,focus_rect(dialog,dialog.focus.get()),dpi);}
+            if dialog.keyboard.get()&&dialog.focus.get()!=dialog.buttons.len(){
+                let shape=if dialog.focus.get()<dialog.buttons.len(){crate::theme::SHAPE_SMALL}else{crate::theme::SHAPE_NONE};
+                crate::paint_control_focus(dc,focus_rect(dialog,dialog.focus.get()),shape,dpi);
+            }
             SelectObject(dc,old);if saved!=0{RestoreDC(dc,saved);}
             if !bitmap.is_null(){BitBlt(screen,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top,dc,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);SelectObject(dc,previous);DeleteObject(bitmap);}
             if !memory.is_null(){DeleteDC(memory);}EndPaint(hwnd,&ps);0
@@ -180,12 +184,14 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             let previous=dialog.hot.replace(next);if previous!=next{if let Some(index)=previous{invalidate_control(hwnd,dialog,index);}if let Some(index)=next{invalidate_control(hwnd,dialog,index);}}0
         }
         windows_sys::Win32::UI::Controls::WM_MOUSELEAVE=>{if let Some(index)=dialog.hot.replace(None){invalidate_control(hwnd,dialog,index);}0}
-        WM_CANCELMODE=>{ReleaseCapture();if let Some(index)=dialog.pressed.replace(None){invalidate_control(hwnd,dialog,index);}0}
-        WM_CAPTURECHANGED=>{if let Some(index)=dialog.pressed.replace(None){invalidate_control(hwnd,dialog,index);}0}
+        WM_TIMER if w==crate::ripple::TIMER=>{crate::ripple::tick(hwnd);0}
+        WM_CANCELMODE=>{crate::ripple::release();ReleaseCapture();if let Some(index)=dialog.pressed.replace(None){invalidate_control(hwnd,dialog,index);}0}
+        WM_CAPTURECHANGED=>{crate::ripple::release();if let Some(index)=dialog.pressed.replace(None){invalidate_control(hwnd,dialog,index);}0}
         WM_LBUTTONDOWN|WM_LBUTTONUP=>{
             let x=l as i16 as i32;let y=(l>>16)as i16 as i32;
             let hit=dialog.buttons.iter().position(|button|inside(&button.rect,x,y)).or_else(||inside(&dialog.close_rect,x,y).then_some(dialog.buttons.len()+1));
             if msg==WM_LBUTTONUP{
+                crate::ripple::release();
                 // Rejection cancels a press, rather than leaving capture stuck.
                 let pressed=dialog.pressed.replace(None);ReleaseCapture();
                 if let Some(index)=pressed{invalidate_control(hwnd,dialog,index);if hit==Some(index){activate_control(hwnd,dialog,index,physical_input);}}
@@ -194,6 +200,7 @@ unsafe extern "system" fn wndproc(hwnd:HWND,msg:u32,w:WPARAM,l:LPARAM)->LRESULT{
             if let Some(index)=hit{
                 if protected(dialog,index)&&!physical_input{crate::record_blocked_control();return 0;}
                 dialog.keyboard.set(false);dialog.pressed.set(Some(index));SetFocus(hwnd);set_dialog_focus(hwnd,dialog,index);SetCapture(hwnd);invalidate_control(hwnd,dialog,index);
+                if let Some(button)=dialog.buttons.get(index){crate::ripple::press(hwnd,button.id as usize,button.rect,x,y);}
             }else if inside(&dialog.text_rect,x,y){dialog.keyboard.set(true);SetFocus(hwnd);set_dialog_focus(hwnd,dialog,dialog.buttons.len());}
             0
         }
@@ -287,7 +294,7 @@ unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs
     let work=if GetMonitorInfoW(monitor,&mut info)!=0{info.rcWork}else{RECT{left:0,top:0,right:GetSystemMetrics(SM_CXSCREEN),bottom:GetSystemMetrics(SM_CYSCREEN)}};
     let max_width=(work.right-work.left-s(32)).max(1);
     let max_height=(work.bottom-work.top-s(32)).max(1);
-    let dc=GetDC(owner);let previous=SelectObject(dc,crate::paint_cache::font(-s(12)));
+    let dc=GetDC(owner);let previous=SelectObject(dc,crate::paint_cache::font(-s(crate::theme::LABEL_LARGE)));
     let mut label_width=0;
     for (_,label) in &specs{
         let mut label_rect:RECT=std::mem::zeroed();
@@ -297,9 +304,10 @@ unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs
     let mut title_size:RECT=std::mem::zeroed();
     DrawTextW(dc,title.as_ptr(),-1,&mut title_size,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
     let gap=s(12);let count=specs.len()as i32;
-    let desired_button_width=(label_width+s(32)).max(s(90));
+    // MD3 buttons pad their label by 24dp on each side.
+    let desired_button_width=(label_width+s(48)).max(s(90));
     let button_row=count*desired_button_width+(count-1)*gap+s(48);
-    SelectObject(dc,crate::paint_cache::font(-s(13)));
+    SelectObject(dc,crate::paint_cache::font(-s(crate::theme::BODY_MEDIUM)));
     let text_left=if flags&0xf0!=0{s(72)}else{s(24)};
     let padding=text_left+s(24);
     let mut natural:RECT=std::mem::zeroed();
@@ -310,7 +318,8 @@ unsafe fn show_on_thread(owner:HWND,text:Vec<u16>,title:Vec<u16>,flags:u32,specs
     SelectObject(dc,previous);ReleaseDC(owner,dc);
     let height=(measured.bottom+s(170)).max(s(230)).min(max_height);
     let button_width=desired_button_width.min(((width-s(48)-(count-1)*gap)/count).max(1));
-    let start=(width-(count*button_width+(count-1)*gap))/2;
+    // MD3 dialogs align their actions to the trailing edge.
+    let start=(width-s(24)-(count*button_width+(count-1)*gap)).max(0);
     let buttons:Vec<Button>=specs.into_iter().enumerate().map(|(index,(id,label))|Button{id,label:wide(&label),rect:RECT{left:start+index as i32*(button_width+gap),top:height-s(65),right:start+index as i32*(button_width+gap)+button_width,bottom:height-s(25)}}).collect();
     let close_result=if buttons.iter().any(|button|button.id==IDCANCEL){Some(IDCANCEL)}else if flags&0xf==MB_OK{Some(IDOK)}else{None};
     let default=((flags>>8)&3)as usize;let dialog=Box::new(Dialog{icon:load_prompt_icon(flags),owner,text,title,flags,focus:Cell::new(default.min(buttons.len()-1)),last_announced:Cell::new(None),focus_pending:Cell::new(false),default:default.min(buttons.len()-1),hot:Cell::new(None),keyboard:Cell::new(true),pressed:Cell::new(None),result:Cell::new(None),close_result,close_rect:RECT{left:width-s(48),top:0,right:width,bottom:s(40)},text_rect:RECT{left:text_left,top:s(65),right:width-s(24),bottom:height-s(90)},text_height:measured.bottom,scroll:Cell::new(0),buttons});

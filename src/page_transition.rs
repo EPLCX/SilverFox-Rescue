@@ -2,6 +2,7 @@
 use std::{cell::RefCell, time::{Duration, Instant}};
 use windows_sys::Win32::{
     Foundation::{HWND, RECT},
+    Graphics::Dwm::DwmFlush,
     Graphics::Gdi::{
         AlphaBlend, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
         CreateSolidBrush, DeleteObject, FillRect, InvalidateRect, SelectObject,
@@ -177,6 +178,13 @@ pub unsafe fn blend(hwnd: HWND, destination: HDC) {
             InvalidateRect(hwnd, &content, 0);
         }
     });
+}
+
+/// Paces the next frame to DWM composition rather than the coarse 16 ms timer
+/// (which lands on 15.6 or 31.2 ms), so each composed frame carries exactly one
+/// new step. The timer stays as the fallback when composition cannot be waited on.
+pub unsafe fn frame_presented(hwnd: HWND) {
+    if DwmFlush() >= 0 { tick(hwnd); }
 }
 
 pub unsafe fn tick(hwnd: HWND) {

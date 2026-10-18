@@ -4,6 +4,8 @@ use crate::hash::sha256;
 mod hash;
 mod engine_host;
 mod github_icon;
+mod menu_icons;
+mod ripple;
 mod gpu_scan;
 mod model;
 mod protection;
@@ -27,6 +29,7 @@ mod settings_ui;
 mod ui_rounding;
 mod dpi;
 mod theme;
+use theme::Role;
 mod virtual_accessibility;
 mod input_guard;
 mod input_devices;
@@ -55,7 +58,7 @@ use walkdir:: WalkDir;
 use windows_sys:: Win32:: {
     Foundation:: *, Graphics:: {
         Dwm::{DwmDefWindowProc,DwmExtendFrameIntoClientArea,DwmSetWindowAttribute,DWMWA_NCRENDERING_POLICY,DWMNCRP_ENABLED}, Gdi:: {
-        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, HALFTONE, InvalidateRect, LineTo, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MoveToEx, Rectangle, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, UpdateWindow, HBRUSH, HDC, HFONT, PAINTSTRUCT, COLOR_WINDOW, DEFAULT_CHARSET, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, NULL_BRUSH, PS_SOLID, SRCCOPY, TRANSPARENT
+        BeginPaint, BitBlt, CreateFontW, DeleteObject, DrawTextW, Ellipse, EndPaint, GetMonitorInfoW, GetTextExtentPoint32W, HALFTONE, InvalidateRect, LineTo, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MoveToEx, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, StretchBlt, UpdateWindow, HBRUSH, HDC, HFONT, PAINTSTRUCT, COLOR_WINDOW, DEFAULT_CHARSET, DT_CENTER, DT_SINGLELINE, DT_VCENTER, FW_NORMAL, SRCCOPY, TRANSPARENT
         }
     }
     , System:: {
@@ -128,8 +131,6 @@ const PAGE_REPORT: usize = 2;
 const PAGE_UPDATE: usize = 3;
 const PAGE_SETTINGS: usize = 4;
 const PAGE_PROGRAM_UPDATE: usize = 5;
-const BLUE: u32 = 0x00FF7716;
-const BLUE_DARK: u32 = 0x00D95E05;
 const DT_END_ELLIPSIS_FLAG: u32 = 0x0000_8000;
 const DT_END_ELLIPSIS: u32 = DT_END_ELLIPSIS_FLAG;
 const DT_RIGHT: u32 = 0x0002;
@@ -336,6 +337,8 @@ static mut LAST_ACCESSIBLE_TEXT: Option<bool> = None;
 fn wide(s: &str) -> Vec<u16> {
     OsStr:: new(s).encode_wide().chain(Some(0)).collect()
 }
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleBitmap,CreateCompatibleDC,DeleteDC};
 fn trace_ui_provider(message:&str){audit::trace(message);}
 fn is_instance_handoff(args:&[String])->bool{args.iter().any(|arg|arg=="--reload"||arg=="--cleanup-update-files")}
 
@@ -450,7 +453,7 @@ fn schedule_update_cleanup(paths:Vec<PathBuf>){
 // Static labels are drawn directly into the current paint DC.
 unsafe fn draw_static_text_image(dc:HDC,rect:&RECT,text:&[u16],font:HFONT,color:u32,background:u32,format:u32){
     if windows_sys::Win32::Graphics::Gdi::RectVisible(dc,rect)==0{return;}
-    let brush=CreateSolidBrush(background);FillRect(dc,rect,brush);DeleteObject(brush);
+    paint_cache::fill(dc,rect,background);
     let old_font=if !font.is_null(){SelectObject(dc,font)}else{std::ptr::null_mut()};
     SetBkMode(dc,TRANSPARENT as i32);SetTextColor(dc,color);let mut draw_rect=*rect;
     DrawTextW(dc,text.as_ptr(),(text.len().saturating_sub(1))as i32,&mut draw_rect,format);
@@ -607,6 +610,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_TIMER if w==BUTTON_ANIMATION_TIMER => {repaint_animated_buttons(hwnd);0}
         WM_TIMER if w==PROGRESS_ANIMATION_TIMER => {animate_progress(hwnd);0}
         WM_TIMER if w==page_transition::TIMER => {page_transition::tick(hwnd);0}
+        WM_TIMER if w==ripple::TIMER => {ripple::tick(hwnd);0}
+        WM_TIMER if w==settings_ui::MENU_TIMER => {settings_ui::tick(hwnd);0}
         WM_GESTURENOTIFY => {
             use windows_sys::Win32::{UI::Input::Touch::*,System::SystemServices::{GC_PAN,GC_PAN_WITH_SINGLE_FINGER_VERTICALLY,GC_PAN_WITH_INERTIA}};
             let config=GESTURECONFIG{dwID:GID_PAN,dwWant:GC_PAN|GC_PAN_WITH_SINGLE_FINGER_VERTICALLY|GC_PAN_WITH_INERTIA,dwBlock:0};
@@ -777,6 +782,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_MOUSEMOVE => {
             let mut track=TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>()as u32,dwFlags:TME_LEAVE,hwndTrack:hwnd,dwHoverTime:0};TrackMouseEvent(&mut track);
             let (x,y)=point_from_lparam(l);
+            if settings_page_open()&&settings_ui::hover(hwnd,x-page_transition::content_offset(),y){return 0;}
             let next=virtual_hover_at(hwnd,x,y);
             if next!=VIRTUAL_HOT{let previous=VIRTUAL_HOT;VIRTUAL_HOT=next;invalidate_virtual_control(hwnd,previous);invalidate_virtual_control(hwnd,next);}
             0
@@ -786,6 +792,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             0
         }
         WM_CAPTURECHANGED => {
+            ripple::release();
             if VIRTUAL_PRESSED!=0{
                 if VIRTUAL_PRESSED==ID_CLOSE&&VIRTUAL_FOCUS==ID_CLOSE{VIRTUAL_FOCUS=0;}
                 VIRTUAL_PRESSED=0;
@@ -797,6 +804,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_LBUTTONDOWN => {
             result_scroll_state().lock().unwrap_or_else(|e|e.into_inner()).dragged=false;
             let (x,y)=point_from_lparam(l);
+            if settings_page_open()&&settings_ui::menu_open(){
+                if let settings_ui::Click::Field(index)=settings_ui::click(hwnd,x-page_transition::content_offset(),y){SetFocus(hwnd);set_virtual_focus(hwnd,[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index]);}
+                SetCapture(hwnd);
+                return 0;
+            }
             let button=virtual_button_at(hwnd,x,y);
             if button==ID_CANCEL{
                 request_stop(hwnd);
@@ -806,6 +818,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             if button!=0{
                 VIRTUAL_PRESSED=button;
                 VIRTUAL_HOT=button;
+                if !matches!(button,ID_MINIMIZE|ID_CLOSE|ID_GITHUB){if let Some((_,rect))=virtual_buttons(hwnd).into_iter().find(|(id,_)|*id==button){ripple::press(hwnd,button,page_transition::display_rect(button,rect),x,y);}}
                 SetFocus(hwnd);SetCapture(hwnd);
                 if matches!(button,ID_MINIMIZE|ID_CLOSE){
                     // A mouse press is not the keyboard focus highlight.
@@ -814,7 +827,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 }else{set_virtual_focus(hwnd,button);}
             } else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{
                 let x=x-page_transition::content_offset();
-                if settings_ui::click(hwnd,x,y){SetFocus(hwnd);if let Some(index)=settings_ui::field_rects(hwnd).iter().position(|rect|rect_contains(rect,x,y)){let id=[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index];set_virtual_focus(hwnd,id);if index!=1{virtual_accessibility::announce_setting(hwnd,id);}}}
+                if let settings_ui::Click::Field(index)=settings_ui::click(hwnd,x,y){SetFocus(hwnd);set_virtual_focus(hwnd,[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index]);SetCapture(hwnd);}
+            } else if state().ui_mode.load(Ordering::Acquire)==2{
+                if let Some(row)=result_row_at(hwnd,x,y){if let Some(rect)=virtual_row_rect(hwnd,ID_FINDING_FIRST+row){ripple::press(hwnd,ID_FINDING_FIRST+row,rect,x,y);SetCapture(hwnd);}}
             } else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{
                 let x=x-page_transition::content_offset();
                 let dpi=dpi::window_dpi(hwnd).max(96)as i32;let s=|v:i32|v*dpi/96;
@@ -822,12 +837,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 if x>=s(24)&&x<client.right-s(24)&&y>=s(105)&&y<client.bottom-s(140){
                     let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());
                     let row=((y-s(109))/s(26).max(1)).max(0)as usize+list.scroll;
-                    if row<list.lines.len(){list.selected=Some(row);drop(list);SetFocus(hwnd);set_virtual_focus(hwnd,1000+row);}
+                    if row<list.lines.len(){list.selected=Some(row);drop(list);SetFocus(hwnd);set_virtual_focus(hwnd,1000+row);if let Some(rect)=virtual_row_rect(hwnd,1000+row){ripple::press(hwnd,1000+row,rect,x,y);SetCapture(hwnd);}}
                 }
             }
             0
         }
         WM_LBUTTONUP => {
+            ripple::release();
             let (x,y)=point_from_lparam(l);
             let released=virtual_button_at(hwnd,x,y);
             VIRTUAL_HOT=virtual_hover_at(hwnd,x,y);
@@ -860,6 +876,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
         WM_MOUSEWHEEL => {let delta=((w>>16)&0xffff)as i16;if state().ui_mode.load(Ordering::Acquire)==2 {scroll_results(hwnd,-delta as f64/120.0*(112*dpi::window_dpi(hwnd).max(96)/96)as f64,delta.unsigned_abs()>=120);}else if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());let max=list.lines.len().saturating_sub(1);list.scroll=if delta<0{(list.scroll+1).min(max)}else{list.scroll.saturating_sub(1)};InvalidateRect(hwnd,null(),0);}0 }
         WM_KEYDOWN => {
+            if settings_page_open()&&settings_ui::menu_key(hwnd,w){return 0;}
             if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS&&VIRTUAL_FOCUS==ID_SETTINGS_THREADS
                 &&settings_ui::key_input(hwnd,w as u32,l){return 0;}
             if w==VK_TAB as usize{move_virtual_focus(hwnd,GetKeyState(VK_SHIFT as i32)<0);return 0;}
@@ -877,9 +894,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     request_stop(hwnd);
                     return 0;
                 }
-                if finding_row(focused).is_some(){virtual_accessibility::handle_action(hwnd,focused,true);return 0;}
+                if finding_row(focused).is_some(){if let Some(rect)=virtual_row_rect(hwnd,focused){ripple::tap(hwnd,focused,rect);}virtual_accessibility::handle_action(hwnd,focused,true);return 0;}
                 if [ID_SETTINGS_GPU,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION].contains(&focused){settings_ui::activate_focused(hwnd);return 0;}
-                if virtual_buttons(hwnd).iter().any(|(id,_)|*id==VIRTUAL_FOCUS){activate_input_button(hwnd,VIRTUAL_FOCUS,physical_input);return 0;}
+                if let Some((id,rect))=virtual_buttons(hwnd).into_iter().find(|(id,_)|*id==VIRTUAL_FOCUS){if !matches!(id,ID_MINIMIZE|ID_CLOSE|ID_GITHUB){ripple::tap(hwnd,id,page_transition::display_rect(id,rect));}activate_input_button(hwnd,VIRTUAL_FOCUS,physical_input);return 0;}
             }
             if (VIRTUAL_FOCUS==202||VIRTUAL_FOCUS>=1000)&&state().ui_mode.load(Ordering::Acquire)==3&&(w==VK_UP as usize||w==VK_DOWN as usize){
                 let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());if !list.lines.is_empty(){let index=list.selected.unwrap_or(0);let next=if w==VK_UP as usize{index.saturating_sub(1)}else{(index+1).min(list.lines.len()-1)};list.selected=Some(next);let visible=12usize;if next<list.scroll{list.scroll=next;}else if next>=list.scroll+visible{list.scroll=next+1-visible;}drop(list);set_virtual_focus(hwnd,1000+next);}return 0;
@@ -1113,16 +1130,14 @@ unsafe fn paint_chrome(hwnd: HWND) {
     let dc=if saved==0{screen_dc}else{memory_dc};
     let dirty=if transitioning{client}else{ps.rcPaint};
     windows_sys::Win32::Graphics::Gdi::IntersectClipRect(dc,dirty.left,dirty.top,dirty.right,dirty.bottom);
-    let white = CreateSolidBrush(theme::color(0x00FFFFFF));
-    FillRect(dc, &client, white);
-    DeleteObject(white);
+    paint_cache::fill(dc, &client, theme::background());
     let title = RECT {
         left: 0, top: 0, right: client.right, bottom: title_height(hwnd)
     }
     ;
     let(minimize, _) = chrome_rects(hwnd);
     SetBkMode(dc, TRANSPARENT as i32);
-    SetTextColor(dc, theme::color(0x00555555));
+    SetTextColor(dc, theme::role(Role::OnSurface));
     if !UI_FONT.is_null() {
         SelectObject(dc, UI_FONT);
     }
@@ -1131,37 +1146,51 @@ unsafe fn paint_chrome(hwnd: HWND) {
     }
     ;
     let text = wide("银狐专杀急救箱");
-    draw_static_text_image(dc,&title_text,&text,UI_FONT,theme::color(0x00555555),theme::color(0x00FFFFFF),DT_VCENTER|DT_SINGLELINE);
+    draw_static_text_image(dc,&title_text,&text,UI_FONT,theme::role(Role::OnSurface),theme::background(),DT_VCENTER|DT_SINGLELINE);
     paint_page(dc, hwnd, &client, dpi);
     paint_virtual_controls(dc,hwnd,&client,dpi);
     if dc!=screen_dc{page_transition::blend(hwnd,dc);}
     paint_keyboard_focus(dc,hwnd,dpi);
+    if mode==3&&subpage==PAGE_SETTINGS{settings_ui::paint_menu(dc,hwnd,&client,dpi);}
     if saved!=0{windows_sys::Win32::Graphics::Gdi::RestoreDC(memory_dc,saved);}
-    if dc!=screen_dc{BitBlt(screen_dc,dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top,dc,dirty.left,dirty.top,SRCCOPY);}
+    if dc!=screen_dc{
+        if transitioning{
+            // A transition frame must reach the screen whole. The paint DC is
+            // clipped to whatever was invalidated (a hover, the progress bar, a
+            // ripple); blitting through it would leave the rest of the content
+            // on the previous frame and show two offsets side by side.
+            let window_dc=windows_sys::Win32::Graphics::Gdi::GetDC(hwnd);
+            if window_dc.is_null(){BitBlt(screen_dc,0,0,client.right,client.bottom,dc,0,0,SRCCOPY);}
+            else{BitBlt(window_dc,0,0,client.right,client.bottom,dc,0,0,SRCCOPY);windows_sys::Win32::Graphics::Gdi::ReleaseDC(hwnd,window_dc);}
+        }else{BitBlt(screen_dc,dirty.left,dirty.top,dirty.right-dirty.left,dirty.bottom-dirty.top,dc,dirty.left,dirty.top,SRCCOPY);}
+    }
     EndPaint(hwnd, &ps);
+    if transitioning{page_transition::frame_presented(hwnd);}
 }
 
 // Draw circular status marks on a 16x surface and downsample with HALFTONE.
 // Direct GDI Ellipse rendering is visibly jagged at the small sizes used by
 // the rescue box; the supersampled surface keeps the edge smooth on every DPI.
-unsafe fn paint_smooth_status_icon(dc:HDC,center_x:i32,center_y:i32,radius:i32,outline:u32,fill:u32,check:bool,failure:bool,dpi:i32){
+// MD3 tonal icon: a container-coloured disc carrying the mark.
+unsafe fn paint_smooth_status_icon(dc:HDC,center_x:i32,center_y:i32,radius:i32,container:u32,mark:u32,check:bool,failure:bool,dpi:i32){
     let bounds=RECT{left:center_x-radius,top:center_y-radius,right:center_x+radius,bottom:center_y+radius};
     if windows_sys::Win32::Graphics::Gdi::RectVisible(dc,&bounds)==0{return;}
-    let factor=16i32;
+    // 8x is indistinguishable from 16x after the HALFTONE downsample at the
+    // sizes used here, and keeps the supersampling surface four times smaller.
+    let factor=8i32;
     let diameter=radius*2;
-    let memory=CreateCompatibleDC(dc);
+    let memory=paint_cache::scratch(dc,diameter*factor,diameter*factor);
     if memory.is_null(){return;}
-    let bitmap=CreateCompatibleBitmap(dc,diameter*factor,diameter*factor);
-    if bitmap.is_null(){DeleteDC(memory);return;}
-    let previous_bitmap=SelectObject(memory,bitmap);
-    let background=CreateSolidBrush(theme::color(0x00FFFFFF));let background_rect=RECT{left:0,top:0,right:diameter*factor,bottom:diameter*factor};FillRect(memory,&background_rect,background);DeleteObject(background);
-    let brush=CreateSolidBrush(fill);let pen=CreatePen(PS_SOLID,(2*dpi/96).max(1)*factor,outline);let previous_brush=SelectObject(memory,brush);let previous_pen=SelectObject(memory,pen);
+    let background_rect=RECT{left:0,top:0,right:diameter*factor,bottom:diameter*factor};
+    paint_cache::fill(memory,&background_rect,theme::background());
+    let outline=mark;
+    let brush=paint_cache::brush(container);let pen=paint_cache::pen((2*dpi/96).max(1)*factor,container);let previous_brush=SelectObject(memory,brush);let previous_pen=SelectObject(memory,pen);
     // Keep the pen fully inside the supersampled bitmap; otherwise the outer
     // half of the ring is clipped before downsampling.
     let inset=((2*dpi/96).max(1)*factor+1)/2;
     Ellipse(memory,inset,inset,diameter*factor-inset,diameter*factor-inset);
     if check {
-        let check_pen=CreatePen(PS_SOLID,(3*dpi/96).max(2)*factor,outline);
+        let check_pen=paint_cache::pen((3*dpi/96).max(2)*factor,outline);
         let old=SelectObject(memory,check_pen);
         // Coordinates are derived from the actual supersampled diameter so the
         // tick remains centered when DPI or icon radius changes.
@@ -1170,18 +1199,17 @@ unsafe fn paint_smooth_status_icon(dc:HDC,center_x:i32,center_y:i32,radius:i32,o
         let x2=left*43/100; let y2=left*68/100;
         let x3=left*76/100; let y3=left*30/100;
         MoveToEx(memory,x1,y1,null_mut());LineTo(memory,x2,y2);LineTo(memory,x3,y3);
-        SelectObject(memory,old);DeleteObject(check_pen);
+        SelectObject(memory,old);
     } else if failure {
-        let cross_pen=CreatePen(PS_SOLID,(3*dpi/96).max(2)*factor,outline);
+        let cross_pen=paint_cache::pen((3*dpi/96).max(2)*factor,outline);
         let old=SelectObject(memory,cross_pen);
         let side=diameter*factor;
         MoveToEx(memory,side*31/100,side*31/100,null_mut());LineTo(memory,side*69/100,side*69/100);
         MoveToEx(memory,side*69/100,side*31/100,null_mut());LineTo(memory,side*31/100,side*69/100);
-        SelectObject(memory,old);DeleteObject(cross_pen);
+        SelectObject(memory,old);
     }
-    SelectObject(memory,previous_pen);SelectObject(memory,previous_brush);DeleteObject(pen);DeleteObject(brush);
+    SelectObject(memory,previous_pen);SelectObject(memory,previous_brush);
     SetStretchBltMode(dc,HALFTONE);StretchBlt(dc,center_x-radius,center_y-radius,diameter,diameter,memory,0,0,diameter*factor,diameter*factor,SRCCOPY);
-    SelectObject(memory,previous_bitmap);DeleteObject(bitmap);DeleteDC(memory);
 }
 
 unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
@@ -1189,51 +1217,57 @@ unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
     let mode = state().ui_mode.load(Ordering:: Acquire);
     let native_text=false;
     SetBkMode(dc, TRANSPARENT as i32);
-    let hero_font = paint_cache::font(-28*dpi/96);
+    let hero_font = paint_cache::font(-theme::HEADLINE_MEDIUM*dpi/96);
     let previous_font = SelectObject(dc, hero_font);
+    let surface=theme::background();
+    let on_surface=theme::role(Role::OnSurface);
+    let on_surface_variant=theme::role(Role::OnSurfaceVariant);
     if mode== 0 {
-        SetTextColor(dc, theme::color(0x00555555));
+        SetTextColor(dc, on_surface);
         let slogan = RECT{left:0,top:scale(145),right:client.right,bottom:scale(205)};
         let slogan_text = wide("银狐专杀急救箱");
-        if !native_text{draw_static_text_image(dc,&slogan,&slogan_text,hero_font,theme::color(0x00555555),theme::color(0x00FFFFFF),DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
-        let small_font=paint_cache::font(-15*dpi/96);
+        let display_font=paint_cache::font(-theme::DISPLAY_SMALL*dpi/96);
+        if !native_text{draw_static_text_image(dc,&slogan,&slogan_text,display_font,on_surface,surface,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
+        let small_font=paint_cache::font(-theme::BODY_LARGE*dpi/96);
         SelectObject(dc,small_font);
-        SetTextColor(dc,theme::color(0x00888888));
+        SetTextColor(dc,on_surface_variant);
         let mut subtitle=RECT{left:0,top:scale(210),right:client.right,bottom:scale(245)};
         let home_operation=state().operation.lock().unwrap_or_else(|error|error.into_inner()).clone();
-        if !native_text{if home_operation.starts_with("扫描成功")||home_operation.starts_with("扫描完成")||home_operation.starts_with("扫描已取消"){let subtitle_text=wide(&home_operation);DrawTextW(dc,subtitle_text.as_ptr(),(subtitle_text.len()-1)as i32,&mut subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}else{let subtitle_text=wide("快速查杀银狐木马");draw_static_text_image(dc,&subtitle,&subtitle_text,small_font,theme::color(0x00888888),theme::color(0x00FFFFFF),DT_CENTER|DT_VCENTER|DT_SINGLELINE);}}
+        if !native_text{if home_operation.starts_with("扫描成功")||home_operation.starts_with("扫描完成")||home_operation.starts_with("扫描已取消"){let subtitle_text=wide(&home_operation);DrawTextW(dc,subtitle_text.as_ptr(),(subtitle_text.len()-1)as i32,&mut subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}else{let subtitle_text=wide("快速查杀银狐木马");draw_static_text_image(dc,&subtitle,&subtitle_text,small_font,on_surface_variant,surface,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}}
         SelectObject(dc,hero_font);
-        
+
     } else if mode== 1 {
-        SetTextColor(dc, theme::color(0x00555555));
-        let scan_font=paint_cache::font(-18*dpi/96);
+        SetTextColor(dc, on_surface);
+        let scan_font=paint_cache::font(-theme::TITLE_LARGE*dpi/96);
         SelectObject(dc,scan_font);
         let mut heading = RECT{left:scale(30),top:scale(60),right:client.right-scale(150),bottom:scale(90)};
         let heading_text = wide(&visible_scan_operation());
         if !native_text{DrawTextW(dc,heading_text.as_ptr(),(heading_text.len()-1)as i32,&mut heading,DT_VCENTER|DT_SINGLELINE);}
         SelectObject(dc,hero_font);
-        
-        let status_font=paint_cache::font(-12*dpi/96);
+
+        let status_font=paint_cache::font(-theme::BODY_SMALL*dpi/96);
         SelectObject(dc,status_font);
-        SetTextColor(dc,theme::color(0x00808080));
+        SetTextColor(dc,on_surface_variant);
         let current=visible_scan_path();
         let status=wide(&format!("当前项目：{}",current));
         let status_rect=scan_text_rects(client,dpi).1;
-        if !native_text{draw_static_text_image(dc,&status_rect,&status,status_font,theme::color(0x00808080),theme::color(0x00FFFFFF),DT_VCENTER|DT_SINGLELINE|windows_sys::Win32::Graphics::Gdi::DT_PATH_ELLIPSIS|windows_sys::Win32::Graphics::Gdi::DT_NOPREFIX);}
+        if !native_text{draw_static_text_image(dc,&status_rect,&status,status_font,on_surface_variant,surface,DT_VCENTER|DT_SINGLELINE|windows_sys::Win32::Graphics::Gdi::DT_PATH_ELLIPSIS|windows_sys::Win32::Graphics::Gdi::DT_NOPREFIX);}
         SelectObject(dc,hero_font);
-        
+
         paint_progress(dc,client,dpi);
         let activity=visible_scan_activity();
-        let panel=CreateSolidBrush(theme::color(0x00F6F8FC));let panel_rect=RECT{left:scale(30),top:scale(150),right:client.right-scale(30),bottom:client.bottom-scale(82)};FillRect(dc,&panel_rect,panel);DeleteObject(panel);
-        let detail_font=paint_cache::font(-12*dpi/96);SelectObject(dc,detail_font);SetTextColor(dc,theme::color(0x00666666));
+        let panel_rect=RECT{left:scale(30),top:scale(150),right:client.right-scale(30),bottom:client.bottom-scale(82)};
+        paint_surface(dc,panel_rect,theme::role(Role::SurfaceContainerLow),None,scale(theme::SHAPE_MEDIUM));
+        let detail_font=paint_cache::font(-theme::BODY_SMALL*dpi/96);SelectObject(dc,detail_font);SetTextColor(dc,on_surface_variant);
         if !native_text{for (row,line) in activity.iter().enumerate(){let mut rect=RECT{left:scale(46),top:scale(162+row as i32*27),right:client.right-scale(46),bottom:scale(187+row as i32*27)};let text=wide(line);DrawTextW(dc,text.as_ptr(),(text.len()-1)as i32,&mut rect,DT_VCENTER|DT_SINGLELINE);}}
         SelectObject(dc,hero_font);
     } else if mode==3 {
-        SetTextColor(dc, theme::color(0x00555555));
+        SetTextColor(dc, on_surface);
         let heading = RECT{left:scale(24),top:scale(58),right:client.right-scale(24),bottom:scale(100)};
         let heading_text = wide(match state().subpage.load(Ordering::Relaxed){PAGE_QUARANTINE=>"隔离区",PAGE_REPORT=>"扫描报告",PAGE_UPDATE=>"规则更新",PAGE_SETTINGS=>"设置与保护状态",PAGE_PROGRAM_UPDATE=>"程序更新",_=>"功能页面"});
-        if !native_text{draw_static_text_image(dc,&heading,&heading_text,hero_font,theme::color(0x00555555),theme::color(0x00FFFFFF),DT_VCENTER|DT_SINGLELINE);}
-        if state().subpage.load(Ordering::Relaxed)==PAGE_SETTINGS{settings_ui::paint(dc,client,dpi,!native_text);}
+        let headline_font=paint_cache::font(-theme::HEADLINE_SMALL*dpi/96);
+        if !native_text{draw_static_text_image(dc,&heading,&heading_text,headline_font,on_surface,surface,DT_VCENTER|DT_SINGLELINE);}
+        if state().subpage.load(Ordering::Relaxed)==PAGE_SETTINGS{settings_ui::paint(dc,hwnd,client,dpi,!native_text);}
     } else if mode==UI_MODE_REMEDIATION_DONE {
         let total=state().remediation_total.load(Ordering::Relaxed);
         let cleaned=state().cleaned_count.load(Ordering::Relaxed);
@@ -1249,24 +1283,37 @@ unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
         // Keep a quiet section label instead of a full-width banner so the title bar
         // remains visible and the result page does not visually hijack it.
         let content_top=title_height(hwnd);
-        SetTextColor(dc,theme::color(BLUE));
+        let primary=theme::role(Role::Primary);
+        SetTextColor(dc,primary);
         let page_title=wide(if scan_only{"扫描结果"}else{"处理结果"});
-        let section_font=paint_cache::font(-15*dpi/96);
+        let section_font=paint_cache::font(-theme::TITLE_SMALL*dpi/96);
         let page_title_rect=RECT{left:scale(30),top:content_top+scale(10),right:client.right-scale(30),bottom:content_top+scale(34)};
-        if !native_text{draw_static_text_image(dc,&page_title_rect,&page_title,section_font,theme::color(BLUE),theme::color(0x00FFFFFF),DT_VCENTER|DT_SINGLELINE);}
-        paint_smooth_status_icon(dc,center,content_top+scale(88),scale(30),if scan_failed||scan_cancelled{theme::color(0x003E90D8)}else if failed==0{BLUE}else{theme::color(0x003E90D8)},theme::color(0x00FFFFFF),!scan_failed&&!scan_cancelled&&failed==0,scan_failed||scan_cancelled||failed>0,dpi);
-        SetTextColor(dc,theme::color(0x00555555));
+        if !native_text{draw_static_text_image(dc,&page_title_rect,&page_title,section_font,primary,surface,DT_VCENTER|DT_SINGLELINE);}
+        let (icon_container,icon_mark)=if scan_failed||failed>0{(Role::ErrorContainer,Role::OnErrorContainer)}else if scan_cancelled{(Role::WarningContainer,Role::OnWarningContainer)}else{(Role::PrimaryContainer,Role::OnPrimaryContainer)};
+        paint_smooth_status_icon(dc,center,content_top+scale(88),scale(30),theme::role(icon_container),theme::role(icon_mark),!scan_failed&&!scan_cancelled&&failed==0,scan_failed||scan_cancelled||failed>0,dpi);
+        SetTextColor(dc,on_surface);
         let heading=RECT{left:scale(24),top:content_top+scale(126),right:client.right-scale(24),bottom:content_top+scale(166)};
         let heading_text=wide(if scan_failed||scan_cancelled{&operation}else if no_threat&&operation.starts_with("扫描成功"){"扫描成功"}else if no_threat{"未发现威胁"}else if failed==0{"处理完成"}else{"部分项目处理失败"});
-        if !native_text{draw_static_text_image(dc,&heading,&heading_text,hero_font,theme::color(0x00555555),theme::color(0x00FFFFFF),DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
-        let detail_font=paint_cache::font(-13*dpi/96);SelectObject(dc,detail_font);
+        if !native_text{draw_static_text_image(dc,&heading,&heading_text,hero_font,on_surface,surface,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
         if !scan_only {
             let gap=scale(12);let card_width=scale(150);let cards_left=center-(card_width*3+gap*2)/2;
-            let cards=[("已处理",cleaned,BLUE),("处理失败",failed,theme::color(0x003E90D8)),("重启后完成",pending,theme::color(0x00A08040))];
-            for (column,(label,value,color)) in cards.into_iter().enumerate(){let left=cards_left+column as i32*(card_width+gap);let card_top=content_top+scale(184);let card=RECT{left,top:card_top,right:left+card_width,bottom:card_top+scale(60)};let fill=CreateSolidBrush(theme::color(0x00F6F8FC));FillRect(dc,&card,fill);DeleteObject(fill);let border=CreatePen(PS_SOLID,1,theme::color(0x00D9E2F0));let old=SelectObject(dc,border);let prior=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,card.left,card.top,card.right,card.bottom);SelectObject(dc,prior);SelectObject(dc,old);DeleteObject(border);SetTextColor(dc,theme::color(color));let value_text=wide(&value.to_string());let mut value_rect=RECT{left,top:card_top+scale(6),right:left+card_width,bottom:card_top+scale(34)};DrawTextW(dc,value_text.as_ptr(),(value_text.len()-1)as i32,&mut value_rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SetTextColor(dc,theme::color(0x00708090));let label_text=wide(label);let mut label_rect=RECT{left,top:card_top+scale(34),right:left+card_width,bottom:card_top+scale(58)};DrawTextW(dc,label_text.as_ptr(),(label_text.len()-1)as i32,&mut label_rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);}
+            let cards=[("已处理",cleaned,Role::Primary),("处理失败",failed,Role::Error),("重启后完成",pending,Role::Warning)];
+            let value_font=paint_cache::font(-theme::TITLE_LARGE*dpi/96);let label_font=paint_cache::font(-theme::LABEL_MEDIUM*dpi/96);
+            for (column,(label,value,color)) in cards.into_iter().enumerate(){
+                let left=cards_left+column as i32*(card_width+gap);let card_top=content_top+scale(184);
+                let card=RECT{left,top:card_top,right:left+card_width,bottom:card_top+scale(60)};
+                paint_surface(dc,card,theme::role(Role::SurfaceContainer),None,scale(theme::SHAPE_MEDIUM));
+                SelectObject(dc,value_font);SetTextColor(dc,theme::role(color));
+                let value_text=wide(&value.to_string());let mut value_rect=RECT{left,top:card_top+scale(6),right:left+card_width,bottom:card_top+scale(36)};
+                DrawTextW(dc,value_text.as_ptr(),(value_text.len()-1)as i32,&mut value_rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+                SelectObject(dc,label_font);SetTextColor(dc,on_surface_variant);
+                let label_text=wide(label);let mut label_rect=RECT{left,top:card_top+scale(34),right:left+card_width,bottom:card_top+scale(56)};
+                DrawTextW(dc,label_text.as_ptr(),(label_text.len()-1)as i32,&mut label_rect,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+            }
         }
+        SelectObject(dc,paint_cache::font(-theme::BODY_MEDIUM*dpi/96));
         if !native_text{
-            SetTextColor(dc,theme::color(0x00808080));
+            SetTextColor(dc,on_surface_variant);
             let summary_text=if scan_failed{"详情见扫描报告。".to_string()}else if scan_cancelled{"扫描已停止。".to_string()}else if no_threat{"未发现威胁。".to_string()}else{format!("已处理 {} 项。",cleaned)};
             let summary=wide(&summary_text);
             let mut summary_rect=RECT{left:scale(24),top:content_top+scale(250),right:client.right-scale(24),bottom:content_top+scale(278)};
@@ -1276,36 +1323,94 @@ unsafe fn paint_page(dc: HDC, hwnd: HWND, client: &RECT, dpi: i32) {
         SelectObject(dc,hero_font);
     } else if mode==2 {
         let threats = state().threat_count.load(Ordering:: Relaxed);
-        SetTextColor(dc, theme::color(0x00555555));
+        SetTextColor(dc, on_surface);
+        SelectObject(dc, paint_cache::font(-theme::HEADLINE_SMALL*dpi/96));
         let summary = if state().operation.lock().unwrap_or_else(|error|error.into_inner()).starts_with("扫描失败") {"扫描失败".to_string()} else if threats==0 {"未发现威胁".to_string()} else {format!("发现 {} 个威胁", threats)};
         let mut summary_rect = RECT{left:scale(30),top:scale(62),right:client.right-scale(30),bottom:scale(95)};
         let summary_text = wide(&summary);
         if !native_text{DrawTextW(dc,summary_text.as_ptr(),(summary_text.len()-1)as i32,&mut summary_rect,DT_VCENTER|DT_SINGLELINE);}
-        let detail_font = paint_cache::font(-12*dpi/96);
+        let detail_font = paint_cache::font(-theme::BODY_MEDIUM*dpi/96);
         SelectObject(dc, detail_font);
-        SetTextColor(dc, theme::color(0x00808080));
+        SetTextColor(dc, on_surface_variant);
         let detail = wide(if state().operation.lock().unwrap_or_else(|error|error.into_inner()).starts_with("扫描失败"){"请查看扫描记录。"}else if threats==0{""}else{"选择项目后点击处理。"});
         let mut detail_rect = RECT{left:scale(30),top:scale(92),right:client.right-scale(30),bottom:scale(114)};
         if !native_text{DrawTextW(dc,detail.as_ptr(),(detail.len()-1)as i32,&mut detail_rect,DT_VCENTER|DT_SINGLELINE);}
-        if threats>0&&!native_text{let indices=alert_indices();let selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());let findings=state().findings.lock().unwrap_or_else(|error|error.into_inner());let offset=state().result_scroll.load(Ordering::Relaxed);let row_height=scale(56);let start=offset/row_height as usize;let remainder=(offset%row_height as usize)as i32;let saved=windows_sys::Win32::Graphics::Gdi::SaveDC(dc);windows_sys::Win32::Graphics::Gdi::IntersectClipRect(dc,scale(30),scale(120),client.right-scale(30),client.bottom-scale(130));let visible_rows=((client.bottom-scale(130)-scale(120))/row_height).max(1)as usize+2;for (visible,index) in indices.iter().skip(start).take(visible_rows).enumerate(){let top=scale(120)+visible as i32*row_height-remainder;let card=RECT{left:scale(30),top,right:client.right-scale(30),bottom:top+scale(48)};let brush=CreateSolidBrush(theme::color(0x00F6F8FC));FillRect(dc,&card,brush);DeleteObject(brush);let pen=CreatePen(PS_SOLID,1,theme::color(0x00D9E2F0));let old=SelectObject(dc,pen);SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,card.left,card.top,card.right,card.bottom);SelectObject(dc,old);DeleteObject(pen);let checked=selected.contains(index);let dot_left=scale(45);let dot_top=top+scale(14);let dot_size=scale(20);let dot=CreateSolidBrush(if checked{BLUE}else{theme::color(0x00FFFFFF)});let old=SelectObject(dc,dot);let outline=CreatePen(PS_SOLID,1,if checked{BLUE}else{theme::color(0x0097A6BC)});let old_pen=SelectObject(dc,outline);Ellipse(dc,dot_left,dot_top,dot_left+dot_size,dot_top+dot_size);SelectObject(dc,old_pen);DeleteObject(outline);SelectObject(dc,old);DeleteObject(dot);if checked{let tick=CreatePen(PS_SOLID,2,0x00FFFFFF);let old=SelectObject(dc,tick);MoveToEx(dc,dot_left+scale(5),dot_top+scale(10),null_mut());LineTo(dc,dot_left+scale(8),dot_top+scale(14));LineTo(dc,dot_left+scale(15),dot_top+scale(6));SelectObject(dc,old);DeleteObject(tick);}if let Some(f)=findings.get(*index){SetTextColor(dc,if f.verdict==Verdict::Malicious{theme::color(0x002F6FCE)}else{theme::color(0x007D6A25)});let mut title=RECT{left:scale(78),top:top+scale(5),right:client.right-scale(42),bottom:top+scale(25)};let text=wide(&format!("[{}] {}",f.verdict.zh(),f.path.display()));DrawTextW(dc,text.as_ptr(),(text.len()-1)as i32,&mut title,DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SetTextColor(dc,theme::color(0x007A8699));let mut reason=RECT{left:scale(78),top:top+scale(25),right:client.right-scale(42),bottom:top+scale(45)};let text=wide(&f.evidence.join("；"));DrawTextW(dc,text.as_ptr(),(text.len()-1)as i32,&mut reason,DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);}}windows_sys::Win32::Graphics::Gdi::RestoreDC(dc,saved);}
+        if threats>0&&!native_text{
+            let indices=alert_indices();
+            let selected=state().selected_findings.lock().unwrap_or_else(|error|error.into_inner());
+            let findings=state().findings.lock().unwrap_or_else(|error|error.into_inner());
+            let offset=state().result_scroll.load(Ordering::Relaxed);
+            let row_height=scale(56);
+            let start=offset/row_height as usize;
+            let remainder=(offset%row_height as usize)as i32;
+            let saved=windows_sys::Win32::Graphics::Gdi::SaveDC(dc);
+            windows_sys::Win32::Graphics::Gdi::IntersectClipRect(dc,scale(30),scale(120),client.right-scale(30),client.bottom-scale(130));
+            let visible_rows=((client.bottom-scale(130)-scale(120))/row_height).max(1)as usize+2;
+            let title_font=paint_cache::font(-theme::BODY_MEDIUM*dpi/96);
+            let chip_font=paint_cache::font(-theme::LABEL_MEDIUM*dpi/96);
+            let evidence_font=paint_cache::font(-theme::BODY_SMALL*dpi/96);
+            for (visible,index) in indices.iter().skip(start).take(visible_rows).enumerate(){
+                let row=start+visible;
+                let top=scale(120)+visible as i32*row_height-remainder;
+                let card=RECT{left:scale(30),top,right:client.right-scale(30),bottom:top+scale(48)};
+                let checked=selected.contains(index);
+                // MD3 list item: selection switches to the secondary container and
+                // the pointer adds the shared hover state layer on top of either.
+                let hovered=VIRTUAL_HOT==ID_FINDING_FIRST+row;
+                let base=theme::role(if checked{Role::SecondaryContainer}else{Role::SurfaceContainerLow});
+                let fill=if hovered{theme::layer(base,on_surface,theme::HOVER)}else{base};
+                paint_surface(dc,card,fill,None,scale(theme::SHAPE_MEDIUM));
+                ripple::paint(dc,hwnd,ID_FINDING_FIRST+row,fill,on_surface,scale(theme::SHAPE_MEDIUM));
+                // MD3 checkbox: 18dp box with a 2dp corner and a 2dp outline.
+                let box_size=scale(18);let box_left=scale(46);let box_top=top+(scale(48)-box_size)/2;
+                let check_box=RECT{left:box_left,top:box_top,right:box_left+box_size,bottom:box_top+box_size};
+                if checked{
+                    paint_surface(dc,check_box,theme::role(Role::Primary),None,scale(2));
+                    let tick=paint_cache::pen(scale(2).max(2),theme::role(Role::OnPrimary));
+                    let old=SelectObject(dc,tick);
+                    MoveToEx(dc,box_left+scale(4),box_top+scale(9),null_mut());
+                    LineTo(dc,box_left+scale(7),box_top+scale(12));
+                    LineTo(dc,box_left+scale(14),box_top+scale(5));
+                    SelectObject(dc,old);
+                }else{
+                    ui_rounding::outline(dc,check_box,on_surface_variant,scale(2),scale(2));
+                }
+                let Some(f)=findings.get(*index) else{continue;};
+                // The verdict reads as a tonal chip ahead of the path.
+                let (chip_fill,chip_text)=match f.verdict{Verdict::Malicious=>(Role::ErrorContainer,Role::OnErrorContainer),Verdict::Suspicious=>(Role::WarningContainer,Role::OnWarningContainer),_=>(Role::SurfaceContainerHighest,Role::OnSurfaceVariant)};
+                SelectObject(dc,chip_font);
+                let label=wide(f.verdict.zh());let mut extent=SIZE{cx:0,cy:0};
+                GetTextExtentPoint32W(dc,label.as_ptr(),(label.len()-1)as i32,&mut extent);
+                let mut chip=RECT{left:scale(78),top:top+scale(6),right:scale(78)+extent.cx+scale(16),bottom:top+scale(24)};
+                paint_surface(dc,chip,theme::role(chip_fill),None,scale(theme::SHAPE_SMALL));
+                SetTextColor(dc,theme::role(chip_text));
+                DrawTextW(dc,label.as_ptr(),(label.len()-1)as i32,&mut chip,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+                SelectObject(dc,title_font);SetTextColor(dc,on_surface);
+                let mut title=RECT{left:chip.right+scale(8),top:top+scale(5),right:client.right-scale(42),bottom:top+scale(25)};
+                let text=wide(&f.path.display().to_string());
+                DrawTextW(dc,text.as_ptr(),(text.len()-1)as i32,&mut title,DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+                SelectObject(dc,evidence_font);SetTextColor(dc,on_surface_variant);
+                let mut reason=RECT{left:scale(78),top:top+scale(26),right:client.right-scale(42),bottom:top+scale(44)};
+                let text=wide(&f.evidence.join("；"));
+                DrawTextW(dc,text.as_ptr(),(text.len()-1)as i32,&mut reason,DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+            }
+            windows_sys::Win32::Graphics::Gdi::RestoreDC(dc,saved);
+        }
         SelectObject(dc, hero_font);
         
     }
     SelectObject(dc, previous_font);
     
-    let separator = CreatePen(PS_SOLID, 1, theme::color(0x00E8E8E8));
-    let old_pen = SelectObject(dc, separator);
-    MoveToEx(dc, scale(24), client.bottom-scale(48), null_mut());
-    LineTo(dc, client.right-scale(24), client.bottom-scale(48));
-    SelectObject(dc, old_pen);
-    DeleteObject(separator);
+    // MD3 divider.
+    let divider = RECT{left:scale(24),top:client.bottom-scale(48),right:client.right-scale(24),bottom:client.bottom-scale(48)+1};
+    paint_cache::fill(dc,&divider,theme::role(Role::OutlineVariant));
     let footer_font = paint_cache::font(-13*dpi/96);
     let old_footer = SelectObject(dc, footer_font);
-    SetTextColor(dc, theme::color(0x00909090));
+    SetTextColor(dc, on_surface_variant);
     // Keep the version label in a fixed left-side slot clear of the timer label.
     let footer = version_footer_rect(dc,client,dpi);
     let version = wide(&version_footer_text());
-    if !native_text{draw_static_text_image(dc,&footer,&version,footer_font,theme::color(0x00708090),theme::color(0x00FFFFFF),DT_VCENTER|DT_SINGLELINE);}
+    if !native_text{draw_static_text_image(dc,&footer,&version,footer_font,on_surface_variant,surface,DT_VCENTER|DT_SINGLELINE);}
     SelectObject(dc, old_footer);
     
     let _ = hwnd;
@@ -1321,33 +1426,31 @@ unsafe fn version_footer_rect(dc:HDC,client:&RECT,dpi:i32)->RECT{
     RECT{left:64*dpi/96,top:client.bottom-45*dpi/96,right:(64*dpi/96+extent.cx).min(client.right-24*dpi/96),bottom:client.bottom}
 }
 
+/// MD3 linear progress track, aligned with the activity card below it. The
+/// progress timer invalidates exactly this rect.
+fn progress_track_rect(client_right:i32,dpi:i32)->RECT{
+    let s=|v:i32|v*dpi/96;
+    RECT{left:s(30),top:s(123),right:(client_right-s(30)).max(s(150)),bottom:s(129)}
+}
 unsafe fn paint_progress(dc:HDC,client:&RECT,dpi:i32){
     let scale=|v:i32|v*dpi/96;
-    let left=scale(110);
-    let right=(client.right-scale(185)).max(left+scale(120));
-    let top=scale(120);
-    let bottom=top+scale(12);
-    let track=CreateSolidBrush(theme::color(0x00EEEEEE));
-    let track_pen=CreatePen(PS_SOLID,1,theme::color(0x00D2D2D2));
-    let old_brush=SelectObject(dc,track);
-    let old_pen=SelectObject(dc,track_pen);
-    if ui_rounding::enabled(){ui_rounding::control(dc,RECT{left,top,right,bottom},theme::color(0x00EEEEEE),Some(theme::color(0x00D2D2D2)),theme::color(0x00FFFFFF),scale(5).max(1));}
-    else{Rectangle(dc,left,top,right,bottom);}
-    let width=(right-left-2).max(1);
+    let track=progress_track_rect(client.right,dpi);
+    let RECT{left,top,right,bottom}=track;
+    paint_surface(dc,track,theme::role(Role::SecondaryContainer),None,scale(theme::SHAPE_FULL));
+    let width=(right-left).max(1);
     let (mode,stage,done,total)=visible_scan_progress();
     let (fill_left,fill_right)=if mode==1 {
         let chunk=(width/4).max(scale(24));
         let travel=(width+chunk) as usize;
         let offset=(progress_animation().lock().unwrap_or_else(|error|error.into_inner()).phase%travel as f64) as i32-chunk;
-        (left+1+offset.max(0),(left+1+offset+chunk).min(right-1))
+        (left+offset.max(0),(left+offset+chunk).min(right))
     } else {
         let percent=progress_animation().lock().unwrap_or_else(|error|error.into_inner()).percent;
-        (left+1,left+1+((width as f64*percent/100.0) as i32))
+        (left,left+((width as f64*percent/100.0) as i32))
     };
     if fill_right>fill_left {
-        let fill_color=if mode==3{0x00A0A0A0}else{BLUE};
-        if ui_rounding::enabled(){ui_rounding::control(dc,RECT{left:fill_left,top:top+1,right:fill_right,bottom:bottom-1},fill_color,None,theme::color(0x00EEEEEE),scale(4).max(1));}
-        else{let fill=CreateSolidBrush(fill_color);let prior=SelectObject(dc,fill);Rectangle(dc,fill_left,top+1,fill_right,bottom-1);SelectObject(dc,prior);DeleteObject(fill);}
+        let fill_color=theme::role(if mode==3{Role::Outline}else{Role::Primary});
+        paint_surface(dc,RECT{left:fill_left,top,right:fill_right,bottom},fill_color,None,scale(theme::SHAPE_FULL));
     }
     if mode!=3 {
         let started=state().scan_started_ms.load(Ordering::Acquire);
@@ -1362,14 +1465,10 @@ unsafe fn paint_progress(dc:HDC,client:&RECT,dpi:i32){
         let mut rect=RECT{left:footer.right+scale(12),top:footer.top,right:client.right-scale(24),bottom:client.bottom};
         let timer_font=paint_cache::font(-12*dpi/96);
         let prior_font=SelectObject(dc,timer_font);
-        SetTextColor(dc,theme::color(0x00707070));SetBkMode(dc,TRANSPARENT as i32);
+        SetTextColor(dc,theme::role(Role::OnSurfaceVariant));SetBkMode(dc,TRANSPARENT as i32);
         DrawTextW(dc,wide_text.as_mut_ptr(),-1,&mut rect,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
         SelectObject(dc,prior_font);
     }
-    SelectObject(dc,old_pen);
-    SelectObject(dc,old_brush);
-    DeleteObject(track_pen);
-    DeleteObject(track);
 }
 unsafe fn apply_dpi_layout(hwnd:HWND,refresh_font:bool){
     if refresh_font||UI_FONT.is_null(){
@@ -1407,52 +1506,62 @@ unsafe fn return_to_home(hwnd:HWND){
     present_page_transition(hwnd);
 }
 
-unsafe fn paint_control_surface(dc:HDC,rect:RECT,color:u32,border:Option<u32>,dpi:i32){
-    if ui_rounding::enabled(){ui_rounding::control(dc,rect,color,border,theme::color(0x00FFFFFF),(4*dpi/96).max(1));return;}
-    let brush=CreateSolidBrush(color);FillRect(dc,&rect,brush);DeleteObject(brush);
-    if let Some(color)=border{let pen=CreatePen(PS_SOLID,1,color);let old_pen=SelectObject(dc,pen);let old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,rect.left,rect.top,rect.right-1,rect.bottom-1);SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);}
+/// MD3 menu container (function menu and settings dropdowns): surface-container
+/// tone at elevation level 2. GDI has no blur, so the shadow is two faint rings
+/// composed over the page, kept small to stay clear of neighbouring controls.
+/// Returns the container colour that items lay their state layers over.
+unsafe fn paint_menu_container(dc:HDC,panel:RECT,dpi:i32)->u32{
+    let s=|v:i32|v*dpi/96;
+    let container=theme::role(Role::SurfaceContainer);
+    let radius=s(theme::SHAPE_MEDIUM);
+    for ring in (1..=2).rev(){
+        let spread=s(ring);
+        let shadow=RECT{left:panel.left-spread,top:panel.top-spread+s(1),right:panel.right+spread,bottom:panel.bottom+spread+s(1)};
+        paint_surface(dc,shadow,theme::layer(theme::background(),theme::role(Role::Shadow),0.04*(3-ring)as f32),None,radius+spread);
+    }
+    paint_surface(dc,panel,container,None,radius);
+    container
+}
+/// Every MD3 container (button, card, chip, menu, list row) goes through here.
+/// Corners are composed over what is already painted, so a shape needs no
+/// knowledge of the surface it sits on. `radius` is in device pixels.
+unsafe fn paint_surface(dc:HDC,rect:RECT,color:u32,border:Option<u32>,radius:i32){
+    ui_rounding::control(dc,rect,color,border,None,radius.max(1));
 }
 unsafe fn paint_caption_glyph(dc:HDC,rect:RECT,minimize:bool,color:u32,dpi:i32){
-    let pen=CreatePen(PS_SOLID,2,color);let old=SelectObject(dc,pen);let x=(rect.left+rect.right)/2;let y=(rect.top+rect.bottom)/2;let half=6*dpi/96;
+    let pen=paint_cache::pen(2,color);let old=SelectObject(dc,pen);let x=(rect.left+rect.right)/2;let y=(rect.top+rect.bottom)/2;let half=6*dpi/96;
     if minimize{MoveToEx(dc,x-half,y,null_mut());LineTo(dc,x+half,y);}else{MoveToEx(dc,x-half,y-half,null_mut());LineTo(dc,x+half,y+half);MoveToEx(dc,x+half,y-half,null_mut());LineTo(dc,x-half,y+half);}
-    SelectObject(dc,old);DeleteObject(pen);
+    SelectObject(dc,old);
 }
 unsafe fn draw_button(item: *const DRAWITEMSTRUCT) {
     if item.is_null() { return; }
     let item = &*item;
     let id = item.CtlID as usize;
+    let dpi=dpi::window_dpi(item.hwndItem).max(96)as i32;
     if id==ID_GITHUB{
-        let dpi=dpi::window_dpi(item.hwndItem).max(96)as i32;
         let inset=5*dpi/96;
         let mut icon=item.rcItem;icon.left+=inset;icon.top+=inset;icon.right-=inset;icon.bottom-=inset;
-        github_icon::paint(item.hDC,icon,if item.itemState&(ODS_HOTLIGHT|ODS_SELECTED)as u32!=0{BLUE}else{theme::color(0x00505050)});
+        github_icon::paint(item.hDC,icon,theme::role(if item.itemState&(ODS_HOTLIGHT|ODS_SELECTED)as u32!=0{Role::Primary}else{Role::OnSurfaceVariant}));
         return;
     }
     if id==ID_MINIMIZE||id==ID_CLOSE {
         draw_shared_button(item,&[],false,UI_FONT);return;
     }
     if matches!(id,ID_SETTINGS_GPU|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|ID_SETTINGS_INPUT_PROTECTION){
-        if ui_rounding::enabled(){ui_rounding::control(item.hDC,item.rcItem,theme::color(0x00FFFFFF),Some(theme::color(0x00DEE5EE)),theme::color(0x00FFFFFF),(4*dpi::window_dpi(item.hwndItem).max(96)as i32/96).max(1));}
-        else{
-            let brush=CreateSolidBrush(theme::color(0x00FFFFFF));FillRect(item.hDC,&item.rcItem,brush);DeleteObject(brush);
-            let pen=CreatePen(PS_SOLID,1,theme::color(0x00DEE5EE));
-            let old_pen=SelectObject(item.hDC,pen);let old_brush=SelectObject(item.hDC,GetStockObject(NULL_BRUSH));
-            Rectangle(item.hDC,item.rcItem.left,item.rcItem.top,item.rcItem.right-1,item.rcItem.bottom-1);
-            SelectObject(item.hDC,old_brush);SelectObject(item.hDC,old_pen);DeleteObject(pen);
-        }
+        paint_surface(item.hDC,item.rcItem,theme::background(),Some(theme::role(Role::Outline)),theme::SHAPE_SMALL*dpi/96);
         let mut caption=vec![0u16;GetWindowTextLengthW(item.hwndItem).max(0)as usize+1];
         GetWindowTextW(item.hwndItem,caption.as_mut_ptr(),caption.len()as i32);
         let caption=String::from_utf16_lossy(&caption[..caption.iter().position(|c|*c==0).unwrap_or(caption.len())]);
         let value=caption.split('：').next_back().unwrap_or(&caption);
-        SetBkMode(item.hDC,TRANSPARENT as i32);SetTextColor(item.hDC,theme::color(0x00445566));
-        if !UI_FONT.is_null(){SelectObject(item.hDC,UI_FONT);}
+        SetBkMode(item.hDC,TRANSPARENT as i32);SetTextColor(item.hDC,theme::role(Role::OnSurface));
+        SelectObject(item.hDC,paint_cache::font(-theme::BODY_MEDIUM*dpi/96));
         let mut rect=item.rcItem;rect.left+=8;rect.right-=8;
         DrawTextW(item.hDC,wide(value).as_ptr(),-1,&mut rect,DT_VCENTER|DT_SINGLELINE);
         return;
     }
     let primary = id==ID_QUICK||id==ID_DONE||id==ID_CANCEL||id==ID_PAGE_ACTION;
     let text=wide(&virtual_button_label(id));
-    draw_shared_button(item,&text,primary,UI_FONT);
+    draw_shared_button(item,&text,primary,paint_cache::font(-theme::LABEL_LARGE*dpi/96));
 }
 
 fn virtual_button_label(id:usize)->String{
@@ -1465,24 +1574,30 @@ fn virtual_button_label(id:usize)->String{
 // Main window and message boxes use this exact control implementation.
 unsafe fn draw_shared_button(item:&DRAWITEMSTRUCT,text:&[u16],primary:bool,font:HFONT){
     let id=item.CtlID as usize;
+    let dpi=dpi::window_dpi(item.hwndItem).max(96)as i32;
+    let surface=theme::background();
     if id==ID_MINIMIZE||id==ID_CLOSE {
+        // Caption buttons keep the native square, full-height Windows shape.
         let hovered=item.itemState&ODS_HOTLIGHT as u32!=0;
-        let active=hovered;
-        let background=animated_button_color(item.hwndItem,id,if active{if id==ID_CLOSE{0x002311E8}else{theme::color(0x00E0E0E0)}}else{theme::color(0x00FFFFFF)});
-        paint_control_surface(item.hDC,item.rcItem,background,None,dpi::window_dpi(item.hwndItem).max(96)as i32);
-        let icon=animated_button_color(item.hwndItem,id+2000,if active&&id==ID_CLOSE{0x00FFFFFF}else if active{theme::color(0x00555555)}else{theme::color(0x00888888)});
-        paint_caption_glyph(item.hDC,item.rcItem,id==ID_MINIMIZE,icon,dpi::window_dpi(item.hwndItem).max(96)as i32);
+        let on_surface=theme::role(Role::OnSurface);
+        let background=animated_button_color(item.hwndItem,id,if hovered{if id==ID_CLOSE{0x002311E8}else{theme::layer(surface,on_surface,theme::HOVER)}}else{surface});
+        paint_cache::fill(item.hDC,&item.rcItem,background);
+        let icon=animated_button_color(item.hwndItem,id+2000,if hovered&&id==ID_CLOSE{0x00FFFFFF}else if hovered{on_surface}else{theme::role(Role::OnSurfaceVariant)});
+        paint_caption_glyph(item.hDC,item.rcItem,id==ID_MINIMIZE,icon,dpi);
         return;
     }
     let pressed = item.itemState&ODS_SELECTED as u32!=0;
     let hot = item.itemState&ODS_HOTLIGHT as u32!=0;
-    let target = if primary {theme::button_fill(if pressed {BLUE_DARK} else if hot {0x00FF9646} else {BLUE})} else {if pressed {theme::color(0x00EDE4DD)} else if hot {theme::color(0x00F5EEE8)} else {theme::color(0x00FFFFFF)}};
-    let color=animated_button_color(item.hwndItem,id,target);
-    paint_control_surface(item.hDC,item.rcItem,color,Some(if primary{theme::button_fill(BLUE)}else{theme::color(BLUE)}),dpi::window_dpi(item.hwndItem).max(96)as i32);
+    // MD3 common buttons: filled for the primary action, outlined otherwise,
+    // shaped like the text fields, with the content colour as the hover/press state layer.
+    let (container,content,border)=if primary{(theme::role(Role::FilledButton),theme::role(Role::OnFilledButton),None)}else{(surface,theme::role(Role::Primary),Some(theme::role(Role::Outline)))};
+    // The press itself is shown by the ripple, so the base only carries hover.
+    let opacity=if pressed||hot{theme::HOVER}else{0.0};
+    let color=animated_button_color(item.hwndItem,id,theme::layer(container,content,opacity));
+    paint_surface(item.hDC,item.rcItem,color,border,theme::SHAPE_SMALL*dpi/96);
+    ripple::paint(item.hDC,item.hwndItem,id,color,content,theme::SHAPE_SMALL*dpi/96);
     SetBkMode(item.hDC, TRANSPARENT as i32);
-    // All secondary controls use the same COLORREF as their blue border.
-    // Keep the control fill and border colors consistent.
-    SetTextColor(item.hDC, if primary {0x00FFFFFF} else {theme::color(BLUE)});
+    SetTextColor(item.hDC, content);
     if !font.is_null() { SelectObject(item.hDC, font); }
     let mut rect=item.rcItem;
     let length=text.iter().position(|value|*value==0).unwrap_or(text.len());
@@ -1554,18 +1669,65 @@ unsafe fn virtual_button_at(hwnd:HWND,x:i32,y:i32)->usize{
 unsafe fn invalidate_virtual_control(hwnd:HWND,id:usize){
     if id==0{return;}
     if let Some((_,rect))=virtual_buttons(hwnd).into_iter().find(|(control,_)|*control==id){InvalidateRect(hwnd,&rect,0);return;}
-    if let Some(index)=[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION].iter().position(|control|*control==id){InvalidateRect(hwnd,&settings_ui::field_rects(hwnd)[index],0);}
+    if let Some(index)=[ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION].iter().position(|control|*control==id){InvalidateRect(hwnd,&settings_ui::field_rects(hwnd)[index],0);return;}
+    if let Some(rect)=virtual_row_rect(hwnd,id){InvalidateRect(hwnd,&rect,0);}
+}
+
+/// Painted list rows have no control rect of their own; derive the one the
+/// painter used so hover changes repaint a single row instead of the window.
+unsafe fn virtual_row_rect(hwnd:HWND,id:usize)->Option<RECT>{
+    let dpi=dpi::window_dpi(hwnd).max(96)as i32;let s=|v:i32|v*dpi/96;
+    let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
+    if let Some(row)=finding_row(id){
+        let area=result_list_rect(hwnd);
+        let top=area.top+(row*(56*dpi/96).max(1)as usize)as i32-state().result_scroll.load(Ordering::Relaxed)as i32;
+        return Some(RECT{left:area.left,top,right:area.right,bottom:top+s(48)});
+    }
+    if state().ui_mode.load(Ordering::Acquire)!=3||state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{return None;}
+    let row=id.checked_sub(1000)?;
+    let list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());
+    let slot=row.checked_sub(list.scroll)?;
+    if row>=list.lines.len(){return None;}
+    let row_height=s(26).max(1);
+    let top=s(105)+s(4)+slot as i32*row_height;
+    Some(RECT{left:s(24)+s(3),top,right:client.right-s(24)-s(3),bottom:top+row_height})
 }
 unsafe fn virtual_hover_at(hwnd:HWND,x:i32,y:i32)->usize{
     let button=virtual_button_at(hwnd,x,y);
     if button!=0{return button;}
-    if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS{
+    let mode=state().ui_mode.load(Ordering::Acquire);
+    let subpage=state().subpage.load(Ordering::Acquire);
+    if mode==3&&subpage==PAGE_SETTINGS{
         let x=x-page_transition::content_offset();
         if let Some(index)=settings_ui::field_rects(hwnd).iter().position(|rect|rect_contains(rect,x,y)){
             return [ID_SETTINGS_GPU,ID_SETTINGS_THREADS,ID_SETTINGS_CHANNEL,ID_SETTINGS_ACCESSIBILITY,ID_SETTINGS_INPUT_PROTECTION][index];
         }
     }
+    // Rows are painted, not child controls, so hover IDs reuse the identifiers
+    // the focus and accessibility layers already assign to them.
+    if mode==2{if let Some(row)=result_row_at(hwnd,x,y){return ID_FINDING_FIRST+row;}}
+    if mode==3&&subpage!=PAGE_SETTINGS{if let Some(row)=page_list_row_at(hwnd,x,y){return 1000+row;}}
     0
+}
+
+/// Row under the pointer on the findings page, matching the click hit test.
+unsafe fn result_row_at(hwnd:HWND,x:i32,y:i32)->Option<usize>{
+    let area=result_list_rect(hwnd);
+    if !rect_contains(&area,x,y){return None;}
+    let row_height=(56*dpi::window_dpi(hwnd).max(96)as i32/96).max(1)as usize;
+    let row=((y-area.top)as usize+state().result_scroll.load(Ordering::Relaxed))/row_height;
+    (row<alert_indices().len()).then_some(row)
+}
+
+/// Row under the pointer in a painted subpage list, matching the click hit test.
+unsafe fn page_list_row_at(hwnd:HWND,x:i32,y:i32)->Option<usize>{
+    let dpi=dpi::window_dpi(hwnd).max(96)as i32;let s=|v:i32|v*dpi/96;
+    let mut client:RECT=std::mem::zeroed();GetClientRect(hwnd,&mut client);
+    let x=x-page_transition::content_offset();
+    if x<s(24)||x>=client.right-s(24)||y<s(105)||y>=client.bottom-s(140){return None;}
+    let list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());
+    let row=((y-s(109))/s(26).max(1)).max(0)as usize+list.scroll;
+    (row<list.lines.len()).then_some(row)
 }
 
 unsafe fn virtual_focus_order(hwnd:HWND)->Vec<usize>{
@@ -1636,26 +1798,45 @@ unsafe fn paint_virtual_controls(dc:HDC,hwnd:HWND,client:&RECT,dpi:i32){
     if state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)!=PAGE_SETTINGS{
         let s=|v:i32|v*dpi/96;
         let area=RECT{left:s(24),top:s(105),right:client.right-s(24),bottom:client.bottom-s(140)};
-        let white=CreateSolidBrush(theme::color(0x00FFFFFF));FillRect(dc,&area,white);DeleteObject(white);
-        let border=CreatePen(PS_SOLID,1,theme::color(0x00DEE5EE));let old=SelectObject(dc,border);let old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,area.left,area.top,area.right,area.bottom);SelectObject(dc,old_brush);SelectObject(dc,old);DeleteObject(border);
+        let container=theme::role(Role::SurfaceContainerLow);
+        paint_surface(dc,area,container,None,s(theme::SHAPE_MEDIUM));
         let list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());
         let row_height=s(26).max(1);let visible=((area.bottom-area.top-s(8))/row_height).max(0)as usize;
-        SetBkMode(dc,TRANSPARENT as i32);if !UI_FONT.is_null(){SelectObject(dc,UI_FONT);}
+        SetBkMode(dc,TRANSPARENT as i32);SelectObject(dc,paint_cache::font(-theme::BODY_MEDIUM*dpi/96));
+        let on_surface=theme::role(Role::OnSurface);
         for (slot,line) in list.lines.iter().skip(list.scroll).take(visible).enumerate(){
             let index=list.scroll+slot;let top=area.top+s(4)+slot as i32*row_height;
-            let row=RECT{left:area.left+s(3),top,right:area.right-s(3),bottom:top+row_height};
-            if list.selected==Some(index){if ui_rounding::enabled(){ui_rounding::control(dc,row,theme::color(0x00F3E7DE),None,theme::color(0x00FFFFFF),s(4).max(1));}else{let brush=CreateSolidBrush(theme::color(0x00F3E7DE));FillRect(dc,&row,brush);DeleteObject(brush);}}
-            SetTextColor(dc,theme::color(0x00555555));let mut text_rect=row;text_rect.left+=s(8);text_rect.right-=s(8);
+            let row=RECT{left:area.left+s(4),top,right:area.right-s(4),bottom:top+row_height};
+            // Selection takes the secondary container; hover adds a state layer.
+            let selected=list.selected==Some(index);let hovered=VIRTUAL_HOT==1000+index;
+            let base=if selected{theme::role(Role::SecondaryContainer)}else{container};
+            let tone=if hovered{theme::layer(base,on_surface,theme::HOVER)}else{base};
+            if selected||hovered{paint_surface(dc,row,tone,None,s(theme::SHAPE_SMALL));}
+            ripple::paint(dc,hwnd,1000+index,tone,on_surface,s(theme::SHAPE_SMALL));
+            SetTextColor(dc,if selected{theme::role(Role::OnSecondaryContainer)}else{on_surface});let mut text_rect=row;text_rect.left+=s(12);text_rect.right-=s(12);
             DrawTextW(dc,wide(line).as_ptr(),-1,&mut text_rect,DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         }
     }
     if VIRTUAL_MENU_OPEN{
         let s=|v:i32|v*dpi/96;let(left,top,menu_width)=menu_layout(hwnd,client,dpi);
         let panel=RECT{left:left-s(4),top:top-s(4),right:left+menu_width+s(4),bottom:top+MENU_IDS.len()as i32*s(MENU_ROW_HEIGHT)+s(MENU_PADDING)};
-        if ui_rounding::enabled(){ui_rounding::control(dc,panel,theme::color(0x00FFFFFF),Some(theme::color(0x00D9E2F0)),theme::color(0x00FFFFFF),s(5).max(1));}
-        else{let brush=CreateSolidBrush(theme::color(0x00FFFFFF));FillRect(dc,&panel,brush);DeleteObject(brush);let pen=CreatePen(PS_SOLID,1,theme::color(0x00D9E2F0));let old=SelectObject(dc,pen);let empty=SelectObject(dc,GetStockObject(NULL_BRUSH));Rectangle(dc,panel.left,panel.top,panel.right,panel.bottom);SelectObject(dc,empty);SelectObject(dc,old);DeleteObject(pen);}
+        let container=paint_menu_container(dc,panel,dpi);
+        let on_surface=theme::role(Role::OnSurface);
+        SetBkMode(dc,TRANSPARENT as i32);SelectObject(dc,paint_cache::font(-theme::LABEL_LARGE*dpi/96));
         let labels=["自定义扫描…","仅扫描进程","仅扫描服务","隔离区","扫描报告","更新规则","设置与状态"];
-        for (index,id) in MENU_IDS.iter().enumerate(){let row=RECT{left,top:top+index as i32*s(MENU_ROW_HEIGHT),right:left+menu_width,bottom:top+(index as i32+1)*s(MENU_ROW_HEIGHT)};let target=if (KEYBOARD_FOCUS_VISIBLE&&VIRTUAL_FOCUS==*id)||VIRTUAL_HOT==*id{theme::color(0x00F3E7DE)}else{theme::color(0x00FFFFFF)};let color=animated_button_color(hwnd,*id,target);if color!=theme::color(0x00FFFFFF){if ui_rounding::enabled(){ui_rounding::control(dc,row,color,None,theme::color(0x00FFFFFF),s(4).max(1));}else{let hot=CreateSolidBrush(color);FillRect(dc,&row,hot);DeleteObject(hot);}}SetTextColor(dc,theme::color(0x00445566));let mut text=row;text.left+=s(12);DrawTextW(dc,wide(labels[index]).as_ptr(),-1,&mut text,DT_VCENTER|DT_SINGLELINE);}
+        let icons=[menu_icons::CUSTOM_SCAN,menu_icons::PROCESS_SCAN,menu_icons::SERVICE_SCAN,menu_icons::QUARANTINE,menu_icons::REPORT,menu_icons::UPDATE_RULES,menu_icons::SETTINGS];
+        let icon_color=theme::role(Role::OnSurfaceVariant);
+        for (index,id) in MENU_IDS.iter().enumerate(){
+            let row=RECT{left,top:top+index as i32*s(MENU_ROW_HEIGHT),right:left+menu_width,bottom:top+(index as i32+1)*s(MENU_ROW_HEIGHT)};
+            let opacity=if VIRTUAL_HOT==*id{theme::HOVER}else if KEYBOARD_FOCUS_VISIBLE&&VIRTUAL_FOCUS==*id{theme::FOCUS}else{0.0};
+            let color=animated_button_color(hwnd,*id,theme::layer(container,on_surface,opacity));
+            if color!=container{paint_surface(dc,row,color,None,s(theme::SHAPE_SMALL));}
+            ripple::paint(dc,hwnd,*id,color,on_surface,s(theme::SHAPE_SMALL));
+            // MD3 leading icon: 20dp, 12dp from the edge, label 12dp after it.
+            let icon_size=s(20);let icon_top=(row.top+row.bottom-icon_size)/2;
+            menu_icons::paint(dc,RECT{left:row.left+s(12),top:icon_top,right:row.left+s(12)+icon_size,bottom:icon_top+icon_size},icons[index],icon_color);
+            SetTextColor(dc,on_surface);let mut text=row;text.left+=s(44);DrawTextW(dc,wide(labels[index]).as_ptr(),-1,&mut text,DT_VCENTER|DT_SINGLELINE);
+        }
     }
 }
 
@@ -1665,21 +1846,26 @@ unsafe fn paint_keyboard_focus(dc:HDC,hwnd:HWND,dpi:i32){
     if !keyboard_focus_visible(VIRTUAL_FOCUS!=0,KEYBOARD_FOCUS_VISIBLE){return;}
     let rect=virtual_accessibility::items(hwnd).into_iter().find(|item|item.id==VIRTUAL_FOCUS&&item.focusable).map(|item|item.rect);
     let Some(rect)=rect else{return;};
-    paint_control_focus(dc,rect,dpi);
+    let id=VIRTUAL_FOCUS;
+    let shape=if finding_row(id).is_some(){theme::SHAPE_MEDIUM}
+        else if matches!(id,ID_SETTINGS_GPU|ID_SETTINGS_THREADS|ID_SETTINGS_CHANNEL|ID_SETTINGS_ACCESSIBILITY|ID_SETTINGS_INPUT_PROTECTION){theme::SHAPE_SMALL}
+        else if id==202{theme::SHAPE_MEDIUM}
+        else if id>=1000||MENU_IDS.contains(&id){theme::SHAPE_SMALL}
+        else if matches!(id,ID_MINIMIZE|ID_CLOSE){theme::SHAPE_NONE}
+        else if id==ID_GITHUB{theme::SHAPE_FULL}
+        else{theme::SHAPE_SMALL};
+    paint_control_focus(dc,rect,shape,dpi);
 }
 
-unsafe fn paint_control_focus(dc:HDC,rect:RECT,dpi:i32){
+/// MD3 focus indicator: a 3dp ring 2dp outside the control, following its
+/// shape (`shape` is the control's corner radius in dp).
+fn settings_page_open()->bool{state().ui_mode.load(Ordering::Acquire)==3&&state().subpage.load(Ordering::Acquire)==PAGE_SETTINGS}
+
+unsafe fn paint_control_focus(dc:HDC,rect:RECT,shape:i32,dpi:i32){
     let s=|value:i32|value*dpi/96;
-    let gap=s(3).max(1);
+    let gap=s(2).max(1);
     let rect=RECT{left:rect.left-gap,top:rect.top-gap,right:rect.right+gap,bottom:rect.bottom+gap};
-    if ui_rounding::enabled(){
-        ui_rounding::outline(dc,rect,theme::color(0x00000000),s(7).max(1),s(2).max(1));
-        return;
-    }
-    let pen=CreatePen(PS_SOLID,s(2).max(1),theme::color(0x00000000));
-    let old_pen=SelectObject(dc,pen);let old_brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
-    Rectangle(dc,rect.left,rect.top,rect.right,rect.bottom);
-    SelectObject(dc,old_brush);SelectObject(dc,old_pen);DeleteObject(pen);
+    ui_rounding::outline(dc,rect,theme::role(Role::Secondary),s(shape)+gap,s(3).max(1));
 }
 
 fn scan_status_summary()->String{
@@ -1800,6 +1986,9 @@ fn main_window_keeps_native_frame_and_full_client_layout(){unsafe{
     assert_eq!(hit((close.left+close.right)/2,(close.top+close.bottom)/2),HTCLIENT as isize);
     assert_eq!(hit(client.right/2,title_height(hwnd)/2),HTCAPTION as isize);
     assert_eq!(hit(client.right/2,client.bottom/2),HTCLIENT as isize);
+    // WM_CREATE applied this machine's saved 控件保护 choice; the close checks
+    // below are about protected behaviour, so pin it on and restore it after.
+    input_guard::configure("enabled");
     state().allow_close.store(false,Ordering::Release);
     SendMessageW(hwnd,WM_CLOSE,0,0);
     assert_ne!(IsWindow(hwnd),0,"unsolicited WM_CLOSE closed the window");
@@ -1819,6 +2008,7 @@ fn main_window_keeps_native_frame_and_full_client_layout(){unsafe{
     activate_input_button(hwnd,ID_CLOSE,true);
     assert_eq!(IsWindow(hwnd),0,"physical Close input did not close the window");
     assert!(state().shutdown.load(Ordering::Acquire),"closing the window did not start application shutdown");
+    input_guard::configure(&settings::load().input_protection);
 }}
 
 #[cfg(test)]
@@ -1915,19 +2105,35 @@ fn painted_page_snapshots(){unsafe{
     let screen=GetDC(hwnd);let memory=CreateCompatibleDC(screen);let width=735i32;let height=558i32;
     let bitmap=CreateCompatibleBitmap(screen,width,height);let previous=SelectObject(memory,bitmap);
     let font=CreateFontW(-12,0,0,0,FW_NORMAL as i32,0,0,0,DEFAULT_CHARSET as u32,0,0,0,0,wide("Microsoft YaHei").as_ptr());UI_FONT=font;
-    for (style,rounding) in [("native",false),("win11",true)]{
-    ui_rounding::simulate_windows_11(rounding);
-    for (name,mode,subpage) in [("home",0,0),("home-menu",0,0),("scan",1,0),("results",2,0),("cancel",UI_MODE_REMEDIATION_DONE,0),("settings",3,PAGE_SETTINGS),("report",3,PAGE_REPORT),("report-menu",3,PAGE_REPORT)]{
+    let sample=|path:&str,verdict:Verdict,evidence:&str|Finding{path:path.into(),sha256:None,verdict,score:90,evidence:vec![evidence.into()],source:"snapshot".into()};
+    let sample_findings=vec![
+        sample(r"C:\Users\Public\Documents\svchost.exe",Verdict::Malicious,"银狐远控特征：反射加载 + 计划任务持久化"),
+        sample(r"C:\ProgramData\Update\loader.dll",Verdict::Suspicious,"可疑签名：证书已吊销"),
+        sample(r"C:\Users\Administrator\AppData\Roaming\helper.exe",Verdict::Malicious,"内存注入：远程线程写入 explorer.exe"),
+    ];
+    for (style,dark) in [("md3-light",false),("md3-dark",true)]{
+    theme::simulate_dark(dark);button_tones().lock().unwrap_or_else(|error|error.into_inner()).clear();
+    for (name,mode,subpage) in [("home",0,0),("home-menu",0,0),("scan",1,0),("results",2,0),("results-threats",2,0),("cancel",UI_MODE_REMEDIATION_DONE,0),("remediated",UI_MODE_REMEDIATION_DONE,0),("settings",3,PAGE_SETTINGS),("settings-dropdown",3,PAGE_SETTINGS),("settings-dropdown-enter",3,PAGE_SETTINGS),("report",3,PAGE_REPORT),("report-menu",3,PAGE_REPORT)]{
         VIRTUAL_MENU_OPEN=name.ends_with("-menu");
         state().ui_mode.store(mode,Ordering::Release);state().subpage.store(subpage,Ordering::Release);
+        let threats=name=="results-threats";
+        publish_findings(state(),if threats{sample_findings.clone()}else{Vec::new()});
+        state().threat_count.store(if threats{sample_findings.len()}else{0},Ordering::Release);
+        *state().selected_findings.lock().unwrap_or_else(|error|error.into_inner())=if threats{[0usize].into_iter().collect()}else{HashSet::new()};
+        VIRTUAL_HOT=if threats{ID_FINDING_FIRST+1}else{0};
+        let remediated=name=="remediated";
+        state().remediation_total.store(if remediated{3}else{0},Ordering::Release);state().cleaned_count.store(if remediated{2}else{0},Ordering::Release);
+        state().remediation_failed.store(if remediated{1}else{0},Ordering::Release);state().remediation_pending.store(0,Ordering::Release);
+        {let mut list=virtual_page_list().lock().unwrap_or_else(|error|error.into_inner());list.lines=if subpage==PAGE_REPORT{(1..=6).map(|line|format!("2026-10-17 10:0{line}  扫描记录 {line}：C:\\Users\\Administrator\\Downloads\\sample-{line}.exe")).collect()}else{Vec::new()};list.selected=(subpage==PAGE_REPORT).then_some(1);list.scroll=0;}
         *state().operation.lock().unwrap_or_else(|error|error.into_inner())=match name{"scan"=>"正在快速扫描…","cancel"=>"扫描已取消",_=>""}.into();
         *state().current_path.lock().unwrap_or_else(|error|error.into_inner())=r"C:\Users\Administrator\Downloads\sample.exe".into();
         state().scan_started_ms.store(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()as usize,Ordering::Release);
         state().progress_total.store(363,Ordering::Release);state().progress_done.store(215,Ordering::Release);
         state().progress_mode.store(2,Ordering::Release);state().progress_stage.store(5,Ordering::Release);
         *current_eta().lock().unwrap_or_else(|error|error.into_inner())=EtaResult::Stalled;
-        let client=RECT{left:0,top:0,right:width,bottom:height};let white=CreateSolidBrush(0x00FFFFFF);FillRect(memory,&client,white);DeleteObject(white);
-        paint_page(memory,hwnd,&client,96);paint_virtual_controls(memory,hwnd,&client,96);
+        let client=RECT{left:0,top:0,right:width,bottom:height};paint_cache::fill(memory,&client,theme::background());
+        settings_ui::open();if name=="settings-dropdown"{settings_ui::open_menu(3);settings_ui::age_menu(Duration::from_secs(1));}if name=="settings-dropdown-enter"{settings_ui::open_menu(3);settings_ui::age_menu(Duration::from_millis(60));}
+        paint_page(memory,hwnd,&client,96);paint_virtual_controls(memory,hwnd,&client,96);settings_ui::paint_menu(memory,hwnd,&client,96);
         let mut info:BITMAPINFO=std::mem::zeroed();info.bmiHeader.biSize=40;info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
         let mut pixels=vec![0u8;(width*height*4)as usize];SelectObject(memory,previous);
         assert_eq!(GetDIBits(screen,bitmap,0,height as u32,pixels.as_mut_ptr().cast(),&mut info,DIB_RGB_COLORS),height);
@@ -1937,9 +2143,11 @@ fn painted_page_snapshots(){unsafe{
         std::fs::write(std::env::temp_dir().join(format!("silverfox-{style}-{name}-ui.bmp")),file).unwrap();
     }
     }
-    ui_rounding::simulate_windows_11(false);
+    theme::refresh();
+    publish_findings(state(),Vec::new());state().threat_count.store(0,Ordering::Release);state().selected_findings.lock().unwrap_or_else(|error|error.into_inner()).clear();
+    state().remediation_total.store(0,Ordering::Release);virtual_page_list().lock().unwrap_or_else(|error|error.into_inner()).lines.clear();
     updater::set_current_rule_version(&previous_version);
-    VIRTUAL_MENU_OPEN=false;
+    VIRTUAL_MENU_OPEN=false;VIRTUAL_HOT=0;
     SelectObject(memory,previous);DeleteObject(bitmap);DeleteDC(memory);ReleaseDC(hwnd,screen);UI_FONT=null_mut();DeleteObject(font);DestroyWindow(hwnd);
 }}
 
@@ -2125,8 +2333,7 @@ unsafe fn animate_progress(hwnd:HWND){
     let changed=mode==1||(animation.percent-previous).abs()>0.001;
     drop(animation);
     if changed{
-        let dpi=dpi::window_dpi(hwnd).max(96)as i32;
-        let track=RECT{left:109*dpi/96,top:119*dpi/96,right:(client_width(hwnd)-184*dpi/96).max(231*dpi/96),bottom:134*dpi/96};
+        let track=progress_track_rect(client_width(hwnd),dpi::window_dpi(hwnd).max(96)as i32);
         InvalidateRect(hwnd,&track,0);
     }
 }
