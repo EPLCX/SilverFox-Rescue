@@ -222,3 +222,13 @@ python tools\sign_program.py
 - [model/README.md](model/README.md)：训练标签、分组评估和原生一致性检查
 - [driver/README.md](driver/README.md)：驱动构建说明
 
+## 许可
+
+本项目以 [AGPL-3.0](LICENSE) 发布。程序中包含以下第三方素材：
+
+| 素材 | 用途 | 许可证 | 许可证全文 |
+| --- | --- | --- | --- |
+| [Material Symbols](https://github.com/google/material-design-icons)（Google，Rounded，字重 400） | 功能菜单图标，路径数据编入程序（[src/menu_icons.rs](src/menu_icons.rs)） | Apache-2.0 | [licenses/material-symbols-LICENSE.txt](licenses/material-symbols-LICENSE.txt) |
+
+`build.ps1` 会把 `licenses/` 目录随程序一起复制到输出目录，分发时请保留该目录。
+
