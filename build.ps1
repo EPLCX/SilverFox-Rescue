@@ -65,6 +65,10 @@ try {
     Write-Host "Built executable $versionedExe ($size bytes)."
     try { Copy-Item -LiteralPath $versionedExe -Destination (Join-Path $output 'silverfox-rescue.exe') -Force -ErrorAction Stop }
     catch { Write-Host "Default executable could not be replaced. Versioned output: $versionedExe" }
+    # Third-party material compiled into the executable must ship with its license text.
+    $licenseOutput = Join-Path $output 'licenses'
+    New-Item -ItemType Directory -Force -Path $licenseOutput | Out-Null
+    Copy-Item -Path (Join-Path $projectRoot 'licenses\*') -Destination $licenseOutput -Force
     $driverRoot = Join-Path $projectRoot 'driver'
     $driverPackage = Join-Path $targetRoot 'protect-driver\package'
     if (-not $buildDllRequested -and -not (Test-Path -LiteralPath $driverPackage -PathType Container)) {
